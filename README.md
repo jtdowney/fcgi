@@ -51,7 +51,7 @@ pub fn main() {
 
   let assert Ok(_) =
     handle_request
-    |> wisp_fcgi.handler(secret_key_base:)
+    |> wisp_fcgi.handler(secret_key_base)
     |> fcgi.new
     |> fcgi.port(9000)
     |> fcgi.start
