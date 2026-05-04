@@ -1,0 +1,302 @@
+import gleam/bit_array
+import gleam/bool
+import gleam/bytes_tree.{type BytesTree}
+import gleam/list
+import gleam/pair
+import gleam/result
+
+const supported_version: Int = 1
+
+pub const max_record_content_size: Int = 65_535
+
+pub const responder_role: Int = 1
+
+pub type Status {
+  RequestComplete
+  CantMultiplexConnection
+  Overloaded
+  UnknownRole
+}
+
+pub type Incoming {
+  BeginRequest(request_id: Int, role: Int, keep_conn: Bool)
+  AbortRequest(request_id: Int)
+  Params(request_id: Int, data: BitArray)
+  Stdin(request_id: Int, data: BitArray)
+  GetValues(names: List(String))
+  IncomingUnknown(request_id: Int, type_byte: Int)
+}
+
+pub type Outgoing {
+  EndRequest(request_id: Int, app_status: Int, protocol_status: Status)
+  Stdout(request_id: Int, data: BitArray)
+  GetValuesResult(pairs: List(#(String, String)))
+  UnknownType(type_byte: Int)
+}
+
+pub type ParseResult {
+  Parsed(record: Incoming, rest: BitArray)
+  NeedMore
+  ParseError(reason: ParseFailure)
+}
+
+pub type ParseFailure {
+  UnsupportedVersion(version: Int)
+  MalformedRecord
+  MalformedNameValue
+}
+
+pub fn encode_record(record: Outgoing) -> BytesTree {
+  case record {
+    EndRequest(id, app_status, protocol_status) -> {
+      let body = <<
+        app_status:size(32),
+        status_to_int(protocol_status):size(8),
+        0:size(24),
+      >>
+      frame_bits(3, id, body)
+    }
+    Stdout(id, data) -> frame_bits(6, id, data)
+    GetValuesResult(pairs) -> frame_bits(10, 0, encode_name_value_pairs(pairs))
+    UnknownType(type_byte) -> {
+      let body = <<type_byte:size(8), 0:size(56)>>
+      frame_bits(11, 0, body)
+    }
+  }
+}
+
+pub fn encode_incoming(record: Incoming) -> BitArray {
+  let tree = case record {
+    BeginRequest(id, role, keep_conn) -> {
+      let flags = case keep_conn {
+        True -> 1
+        False -> 0
+      }
+      let body = <<role:size(16), flags:size(8), 0:size(40)>>
+      frame_bits(1, id, body)
+    }
+    AbortRequest(id) -> frame_bits(2, id, <<>>)
+    Params(id, data) -> frame_bits(4, id, data)
+    Stdin(id, data) -> frame_bits(5, id, data)
+    GetValues(names) -> {
+      let pairs = list.map(names, fn(name) { #(name, "") })
+      frame_bits(9, 0, encode_name_value_pairs(pairs))
+    }
+    IncomingUnknown(id, type_byte) -> frame_bits(type_byte, id, <<>>)
+  }
+
+  bytes_tree.to_bit_array(tree)
+}
+
+pub fn encode_stdout(request_id: Int, body: BytesTree) -> BytesTree {
+  frame_tree(6, request_id, body)
+}
+
+fn frame_bits(record_type: Int, request_id: Int, body: BitArray) -> BytesTree {
+  frame_tree(record_type, request_id, bytes_tree.from_bit_array(body))
+}
+
+fn frame_tree(record_type: Int, request_id: Int, body: BytesTree) -> BytesTree {
+  let content_length = bytes_tree.byte_size(body)
+  let padding_length = padding_for(content_length)
+  let header = <<
+    supported_version:size(8),
+    record_type:size(8),
+    request_id:size(16),
+    content_length:size(16),
+    padding_length:size(8),
+    0:size(8),
+  >>
+  let padding = <<0:size({ padding_length * 8 })>>
+  bytes_tree.from_bit_array(header)
+  |> bytes_tree.append_tree(body)
+  |> bytes_tree.append(padding)
+}
+
+fn padding_for(content_length: Int) -> Int {
+  let remainder = content_length % 8
+  case remainder {
+    0 -> 0
+    _ -> 8 - remainder
+  }
+}
+
+fn status_to_int(status: Status) -> Int {
+  case status {
+    RequestComplete -> 0
+    CantMultiplexConnection -> 1
+    Overloaded -> 2
+    UnknownRole -> 3
+  }
+}
+
+pub fn parse_record(buffer: BitArray) -> ParseResult {
+  case buffer {
+    <<
+      version:size(8),
+      record_type:size(8),
+      id:size(16),
+      content_length:size(16),
+      padding_length:size(8),
+      _reserved:size(8),
+      rest:bits,
+    >> -> {
+      use <- bool.guard(
+        when: version != supported_version,
+        return: ParseError(UnsupportedVersion(version)),
+      )
+      let total = content_length + padding_length
+      use <- bool.guard(
+        when: bit_array.byte_size(rest) < total,
+        return: NeedMore,
+      )
+
+      let trailer_length = bit_array.byte_size(rest) - total
+      let assert Ok(body) = bit_array.slice(rest, 0, content_length)
+      let assert Ok(remaining) = bit_array.slice(rest, total, trailer_length)
+      parse_body(record_type, id, body, remaining)
+    }
+    _ -> NeedMore
+  }
+}
+
+fn parse_body(
+  record_type: Int,
+  id: Int,
+  body: BitArray,
+  rest: BitArray,
+) -> ParseResult {
+  case record_type {
+    1 -> parse_begin_request(id, body, rest)
+    2 -> Parsed(AbortRequest(id), rest)
+    4 -> Parsed(Params(id, body), rest)
+    5 -> Parsed(Stdin(id, body), rest)
+    9 -> parse_get_values(body, rest)
+    _ -> Parsed(IncomingUnknown(request_id: id, type_byte: record_type), rest)
+  }
+}
+
+fn parse_begin_request(id: Int, body: BitArray, rest: BitArray) -> ParseResult {
+  case body {
+    <<role:size(16), flags:size(8), _reserved:size(40)>> -> {
+      let keep = flags % 2 == 1
+      Parsed(BeginRequest(request_id: id, role:, keep_conn: keep), rest)
+    }
+    _ -> ParseError(MalformedRecord)
+  }
+}
+
+pub fn encode_name_value_pairs(pairs: List(#(String, String))) -> BitArray {
+  list.fold(pairs, <<>>, fn(acc, pair) {
+    let #(name, value) = pair
+    let name_bytes = bit_array.from_string(name)
+    let value_bytes = bit_array.from_string(value)
+    let name_length = bit_array.byte_size(name_bytes)
+    let value_length = bit_array.byte_size(value_bytes)
+    <<
+      acc:bits,
+      encode_length(name_length):bits,
+      encode_length(value_length):bits,
+      name_bytes:bits,
+      value_bytes:bits,
+    >>
+  })
+}
+
+fn encode_length(n: Int) -> BitArray {
+  case n < 128 {
+    True -> <<n:size(8)>>
+    False -> <<1:size(1), n:size(31)>>
+  }
+}
+
+pub fn parse_name_value_pairs(
+  bytes: BitArray,
+) -> Result(List(#(String, String)), ParseFailure) {
+  parse_name_value_pairs_loop(bytes, [])
+}
+
+fn parse_name_value_pairs_loop(
+  bytes: BitArray,
+  acc: List(#(String, String)),
+) -> Result(List(#(String, String)), ParseFailure) {
+  use <- bool.guard(
+    when: bit_array.byte_size(bytes) == 0,
+    return: Ok(list.reverse(acc)),
+  )
+
+  use #(pair, rest) <- result.try(parse_one_pair(bytes))
+  parse_name_value_pairs_loop(rest, [pair, ..acc])
+}
+
+fn parse_one_pair(
+  bytes: BitArray,
+) -> Result(#(#(String, String), BitArray), ParseFailure) {
+  use #(name_length, after_name_length) <- result.try(parse_length(bytes))
+  use #(value_length, after_value_length) <- result.try(parse_length(
+    after_name_length,
+  ))
+  case after_value_length {
+    <<
+      name_bytes:bytes-size(name_length),
+      value_bytes:bytes-size(value_length),
+      rest:bits,
+    >> -> {
+      use name <- result.try(
+        bit_array.to_string(name_bytes)
+        |> result.replace_error(MalformedNameValue),
+      )
+      use value <- result.map(
+        bit_array.to_string(value_bytes)
+        |> result.replace_error(MalformedNameValue),
+      )
+      #(#(name, value), rest)
+    }
+    _ -> Error(MalformedNameValue)
+  }
+}
+
+fn parse_length(bytes: BitArray) -> Result(#(Int, BitArray), ParseFailure) {
+  case bytes {
+    <<0:size(1), n:size(7), rest:bits>> -> Ok(#(n, rest))
+    <<1:size(1), n:size(31), rest:bits>> -> Ok(#(n, rest))
+    _ -> Error(MalformedNameValue)
+  }
+}
+
+fn parse_get_values(body: BitArray, rest: BitArray) -> ParseResult {
+  case parse_name_value_pairs(body) {
+    Error(reason) -> ParseError(reason)
+    Ok(pairs) -> {
+      let names = list.map(pairs, pair.first)
+      Parsed(GetValues(names), rest)
+    }
+  }
+}
+
+pub fn chunk_stdout(request_id: Int, body: BitArray) -> List(Outgoing) {
+  chunk_stdout_loop(request_id, body, [])
+}
+
+fn chunk_stdout_loop(
+  request_id: Int,
+  body: BitArray,
+  acc: List(Outgoing),
+) -> List(Outgoing) {
+  let total = bit_array.byte_size(body)
+  use <- bool.guard(when: total == 0, return: list.reverse(acc))
+  use <- bool.guard(
+    when: total <= max_record_content_size,
+    return: list.reverse([Stdout(request_id, body), ..acc]),
+  )
+
+  let assert Ok(head) = bit_array.slice(body, 0, max_record_content_size)
+  let assert Ok(tail) =
+    bit_array.slice(
+      body,
+      max_record_content_size,
+      total - max_record_content_size,
+    )
+
+  chunk_stdout_loop(request_id, tail, [Stdout(request_id, head), ..acc])
+}

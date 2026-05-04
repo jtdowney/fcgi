@@ -1,0 +1,9 @@
+name = "wisp_hello"
+version = "0.1.0"
+target = "erlang"
+
+[dependencies]
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+gleam_erlang = ">= 1.3.0 and < 2.0.0"
+fcgi = { path = "../.." }
+wisp = ">= 2.2.2 and < 3.0.0"

@@ -1,0 +1,10 @@
+---
+version: 1.6.0
+title: writes_bytes_response_payload
+file: ./test/fcgi/internal/handler_test.gleam
+test_name: writes_bytes_response_with_cgi_header_block_test
+---
+Status: 200 OK
+content-type: text/plain
+
+hello

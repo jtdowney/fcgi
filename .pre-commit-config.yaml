@@ -1,0 +1,27 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+        exclude: ^test/birdie_snapshots/.*\.accepted$
+      - id: mixed-line-ending
+        exclude: ^test/birdie_snapshots/.*\.accepted$
+      - id: trailing-whitespace
+        exclude: ^test/birdie_snapshots/.*\.accepted$
+  - repo: https://github.com/jtdowney/pre-commit-gleam
+    rev: v1.0.0
+    hooks:
+      - id: format
+      - id: check
+  - repo: local
+    hooks:
+      - id: erlfmt
+        name: erlfmt
+        entry: rebar3 fmt -c
+        language: system
+        files: ^(src|test)/.*\.erl$
+        pass_filenames: false

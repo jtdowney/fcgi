@@ -1,0 +1,10 @@
+---
+version: 1.6.0
+title: drops_response_headers_with_crlf_in_value
+file: ./test/fcgi/internal/handler_test.gleam
+test_name: drops_response_headers_with_crlf_in_value_test
+---
+Status: 200 OK
+x-clean: ok
+
+

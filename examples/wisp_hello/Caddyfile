@@ -1,0 +1,17 @@
+# Caddy reverse proxy in front of the FastCGI Wisp example.
+#
+# Start the example: cd examples/wisp_hello && gleam run
+# Start Caddy:       caddy run --config Caddyfile
+# Visit:             http://localhost:8080/      -> "Hello, FastCGI!"
+#                    POST http://localhost:8080/echo with a body
+{
+	auto_https off
+}
+
+:8080 {
+	reverse_proxy 127.0.0.1:9000 {
+		transport fastcgi {
+			env PATH_INFO {http.request.uri.path}
+		}
+	}
+}

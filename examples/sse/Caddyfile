@@ -1,0 +1,23 @@
+# Caddy reverse proxy in front of the FastCGI SSE example.
+#
+# Start the example: cd examples/sse && gleam run
+# Start Caddy:       caddy run --config Caddyfile
+# Visit:             http://localhost:8080/        -> demo page
+#                    http://localhost:8080/events  -> SSE stream
+#
+# `flush_interval -1` disables Caddy's response buffering so each
+# `STDOUT` record from the FastCGI app is forwarded to the client
+# immediately. Without it, Caddy buffers chunks and the events arrive
+# in a single burst when the stream ends.
+{
+	auto_https off
+}
+
+:8080 {
+	reverse_proxy 127.0.0.1:9000 {
+		transport fastcgi {
+			env PATH_INFO {http.request.uri.path}
+		}
+		flush_interval -1
+	}
+}

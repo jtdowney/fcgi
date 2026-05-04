@@ -1,0 +1,10 @@
+---
+version: 1.6.0
+title: malformed_params_returns_400_payload
+file: ./test/fcgi_test.gleam
+test_name: malformed_params_returns_400_test
+---
+Status: 400 Bad Request
+content-type: text/plain; charset=utf-8
+
+malformed FastCGI parameters
