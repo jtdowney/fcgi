@@ -18,17 +18,16 @@ const event_count: Int = 10
 
 const event_interval_ms: Int = 1000
 
+const socket_path = "/tmp/fcgi_sse.sock"
+
 pub fn main() -> Nil {
-  let assert Ok(started) =
+  let assert Ok(_) =
     handle_request
     |> fcgi.new
-    |> fcgi.bind("127.0.0.1")
-    |> fcgi.port(9000)
+    |> fcgi.listen_path(socket_path)
     |> fcgi.start
 
-  io.println(
-    "Listening on 127.0.0.1:" <> int.to_string(fcgi.bound_port(started)),
-  )
+  io.println("Listening on unix:" <> socket_path)
   process.sleep_forever()
 }
 

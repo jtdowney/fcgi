@@ -1,24 +1,35 @@
 //// Wisp adapter for the FastCGI server. Mirrors `wisp/wisp_mist`.
+////
+////
+//// ## Wisp version compatibility
+////
+//// This adapter imports `wisp/internal` to build a `wisp.Connection`
+//// from a custom body reader. Wisp does not expose those symbols as
+//// public API, and this is the same integration point Wisp's own
+//// `wisp/wisp_mist` adapter uses, so in practice the surface is
+//// stable across Wisp's minor releases. It is, however, not
+//// semver-stable: a future Wisp minor release could rename or
+//// reshape `wisp/internal` without it being treated as a breaking
+//// change.
+////
+//// The `gleam.toml` for this package allows the full
+//// `>= 2.2.2 and < 3.0.0` Wisp range. If you adopt a new Wisp minor
+//// version before this package is updated, pin Wisp to the version
+//// you have validated against in your own `gleam.toml` and treat any
+//// adapter compile failure on a Wisp upgrade as a signal to wait
+//// for an `fcgi` release that has been tested against it.
 
 import exception
 import fcgi
-import fcgi/internal/file
+import fcgi/internal/connection
 import gleam/bit_array
-import gleam/bool
 import gleam/bytes_tree
 import gleam/http/request.{type Request as HttpRequest}
 import gleam/http/response.{type Response as HttpResponse}
 import gleam/int
-import gleam/option.{type Option}
-import gleam/result
+import gleam/option
 import gleam/string
 import wisp
-
-const file_stream_chunk_size: Int = 65_535
-
-// This module is the single point of contact with `wisp/internal`, which
-// Wisp does not expose as public API but is required to build a
-// `wisp.Connection` from a custom body reader.
 import wisp/internal
 
 /// Adapt a Wisp handler into the FCGI handler shape so callers can compose
@@ -27,13 +38,12 @@ pub fn handler(
   handler: fn(wisp.Request) -> wisp.Response,
   secret_key_base: String,
 ) -> fn(HttpRequest(fcgi.Connection)) -> HttpResponse(fcgi.ResponseData) {
-  fn(request: HttpRequest(_)) {
-    let connection =
-      internal.make_connection(body_reader(request), secret_key_base)
-    let request = request.set_body(request, connection)
+  fn(req: HttpRequest(_)) {
+    let connection = internal.make_connection(body_reader(req), secret_key_base)
+    let req = request.set_body(req, connection)
 
     use <- exception.defer(fn() {
-      case wisp.delete_temporary_files(request) {
+      case wisp.delete_temporary_files(req) {
         Ok(Nil) -> Nil
         Error(error) ->
           wisp.log_error(
@@ -42,24 +52,35 @@ pub fn handler(
       }
     })
 
-    handler(request)
+    handler(req)
     |> map_response
   }
 }
 
-fn body_reader(request: HttpRequest(fcgi.Connection)) -> internal.Reader {
-  let stream = fcgi.stream(request)
-  fn(size) { wrap_chunk(stream(size)) }
+fn body_reader(req: HttpRequest(fcgi.Connection)) -> internal.Reader {
+  let body = fcgi.body(req)
+  reader_from(body, total: bit_array.byte_size(body), offset: 0)
 }
 
-fn wrap_chunk(chunk: Result(fcgi.Chunk, Nil)) -> Result(internal.Read, Nil) {
-  result.map(chunk, fn(chunk) {
-    case chunk {
-      fcgi.Done -> internal.ReadingFinished
-      fcgi.Chunk(data, consume) ->
-        internal.Chunk(data, fn(size) { wrap_chunk(consume(size)) })
+fn reader_from(
+  body: BitArray,
+  total total: Int,
+  offset offset: Int,
+) -> internal.Reader {
+  fn(size) {
+    case size <= 0, offset >= total {
+      True, _ -> Error(Nil)
+      _, True -> Ok(internal.ReadingFinished)
+      _, False -> {
+        let take = int.min(size, total - offset)
+        let assert Ok(slice) = bit_array.slice(body, offset, take)
+        Ok(internal.Chunk(
+          slice,
+          reader_from(body, total:, offset: offset + take),
+        ))
+      }
     }
-  })
+  }
 }
 
 @internal
@@ -79,69 +100,29 @@ fn map_file_body(
   response: wisp.Response,
   path: String,
   offset: Int,
-  limit: Option(Int),
+  limit: option.Option(Int),
 ) -> HttpResponse(fcgi.ResponseData) {
-  case file.open(path) {
-    Ok(handle) -> {
-      let producer = fn(sender) {
-        stream_handle(sender, handle, int.max(0, offset), limit)
-        file.close(handle)
-      }
-      response.set_body(response, fcgi.Stream(producer))
-    }
+  case connection.open_file(path) {
     Error(error) -> {
       wisp.log_error("wisp_fcgi: " <> string.inspect(error))
-      file_error_response()
-    }
-  }
-}
-
-fn stream_handle(
-  sender: fcgi.StreamSender,
-  handle: file.Handle,
-  offset: Int,
-  remaining: Option(Int),
-) -> Nil {
-  let to_read = case remaining {
-    option.None -> file_stream_chunk_size
-    option.Some(n) -> int.min(n, file_stream_chunk_size)
-  }
-  use <- bool.guard(when: to_read <= 0, return: Nil)
-  case file.pread(handle, offset, to_read) {
-    Error(_) -> Nil
-    Ok(data) ->
-      emit_and_continue(sender, handle, offset, to_read, remaining, data)
-  }
-}
-
-fn emit_and_continue(
-  sender: fcgi.StreamSender,
-  handle: file.Handle,
-  offset: Int,
-  to_read: Int,
-  remaining: Option(Int),
-  data: BitArray,
-) -> Nil {
-  let bytes_read = bit_array.byte_size(data)
-  use <- bool.guard(when: bytes_read == 0, return: Nil)
-  case fcgi.send_chunk(sender, data) {
-    Error(_) -> Nil
-    Ok(_) -> {
-      use <- bool.guard(when: bytes_read < to_read, return: Nil)
-      stream_handle(
-        sender,
-        handle,
-        offset + bytes_read,
-        option.map(remaining, fn(n) { n - bytes_read }),
+      response.new(500)
+      |> response.set_header("content-type", "text/plain; charset=utf-8")
+      |> response.set_body(
+        fcgi.Bytes(bytes_tree.from_string("could not open response file")),
       )
     }
+    Ok(handle) ->
+      response.set_body(
+        response,
+        fcgi.Stream(fn(sender) {
+          connection.stream_file(
+            handle,
+            offset:,
+            remaining: limit,
+            emit: fn(data) { fcgi.send_chunk(sender, data) },
+          )
+          connection.close_file(handle)
+        }),
+      )
   }
-}
-
-fn file_error_response() -> HttpResponse(fcgi.ResponseData) {
-  response.new(500)
-  |> response.set_header("content-type", "text/plain; charset=utf-8")
-  |> response.set_body(
-    fcgi.Bytes(bytes_tree.from_string("could not open response file")),
-  )
 }

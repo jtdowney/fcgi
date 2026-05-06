@@ -37,3 +37,22 @@ jobs:
           rebar3-version: "3"
       - run: gleam deps download
       - run: gleam test
+
+  examples:
+    name: Examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          gleam-version: "1.16"
+          rebar3-version: "3"
+      - working-directory: examples/wisp_hello
+        run: gleam format --check src
+      - working-directory: examples/wisp_hello
+        run: gleam build
+      - working-directory: examples/sse
+        run: gleam format --check src
+      - working-directory: examples/sse
+        run: gleam build

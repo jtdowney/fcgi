@@ -3,7 +3,7 @@
 [![Package Version](https://img.shields.io/hexpm/v/fcgi)](https://hex.pm/packages/fcgi)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/fcgi/)
 
-A FastCGI Responder server for Gleam, designed to sit behind a reverse proxy such as Caddy. Speaks the FastCGI Responder role over TCP and exposes a `gleam/http`-shaped handler API plus a Wisp adapter.
+A FastCGI Responder server for Gleam, designed to sit behind a reverse proxy such as Caddy. Speaks the FastCGI Responder role over a Unix domain socket and exposes a `gleam/http`-shaped handler API plus a Wisp adapter.
 
 ## Installation
 
@@ -23,7 +23,7 @@ import gleam/http/response.{type Response}
 pub fn main() {
   let assert Ok(_) =
     fcgi.new(handle_request)
-    |> fcgi.port(9000)
+    |> fcgi.listen_path("/tmp/fcgi.sock")
     |> fcgi.start
 
   process.sleep_forever()
@@ -53,7 +53,7 @@ pub fn main() {
     handle_request
     |> wisp_fcgi.handler(secret_key_base)
     |> fcgi.new
-    |> fcgi.port(9000)
+    |> fcgi.listen_path("/tmp/fcgi.sock")
     |> fcgi.start
 
   process.sleep_forever()
@@ -65,11 +65,13 @@ fn handle_request(_request: wisp.Request) -> wisp.Response {
 }
 ```
 
+The socket file is created when the server starts and removed on shutdown.
+
 ## Reverse-proxy with Caddy
 
 ```caddy
 example.com {
-    reverse_proxy 127.0.0.1:9000 {
+    reverse_proxy unix//tmp/fcgi.sock {
         transport fastcgi {
             env PATH_INFO {http.request.uri.path}
         }

@@ -1,0 +1,10 @@
+---
+version: 2.0.0
+title: wisp_missing_file_returns_500_payload
+file: ./test/fcgi/wisp_fcgi_test.gleam
+test_name: end_to_end_wisp_missing_file_returns_500_test
+---
+Status: 500
+content-type: text/plain; charset=utf-8
+
+could not open response file

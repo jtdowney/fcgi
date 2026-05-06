@@ -1,10 +1,10 @@
 ---
-version: 1.6.0
+version: 2.0.0
 title: file_deleted_after_validation_returns_500_payload
 file: ./test/fcgi_test.gleam
 test_name: file_deleted_after_validation_returns_500_test
 ---
-Status: 500 Internal Server Error
+Status: 500
 content-type: text/plain; charset=utf-8
 
 could not open response file

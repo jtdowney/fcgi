@@ -1,7 +1,9 @@
+import fcgi/internal/connection
 import fcgi/internal/protocol
 import gleam/bit_array
 import gleam/bool
 import gleam/list
+import temporary
 
 const supported_version: Int = 1
 
@@ -9,6 +11,12 @@ pub type OutgoingParseResult {
   OutgoingParsed(record: protocol.Outgoing, rest: BitArray)
   OutgoingNeedMore
   OutgoingParseError(reason: protocol.ParseFailure)
+}
+
+pub fn with_temp_socket_path(fun: fn(String) -> a) -> a {
+  let assert Ok(value) =
+    temporary.create(temporary.directory(), fn(dir) { fun(dir <> "/sock") })
+  value
 }
 
 pub fn request_stream_bytes(
@@ -45,21 +53,6 @@ pub fn is_end_request(record: protocol.Outgoing) -> Bool {
     protocol.EndRequest(_, _, _) -> True
     _ -> False
   }
-}
-
-pub fn collect_stdout_for(
-  records: List(protocol.Outgoing),
-  id: Int,
-) -> BitArray {
-  list.fold(records, <<>>, fn(acc, record) {
-    case record {
-      protocol.Stdout(record_id, data) if record_id == id -> <<
-        acc:bits,
-        data:bits,
-      >>
-      _ -> acc
-    }
-  })
 }
 
 pub fn parse_outgoing(buffer: BitArray) -> OutgoingParseResult {
@@ -189,4 +182,18 @@ pub fn collect_stdout(records: List(protocol.Outgoing)) -> BitArray {
       _ -> acc
     }
   })
+}
+
+pub fn recv_until_closed(socket: connection.Socket) -> BitArray {
+  recv_until_closed_loop(socket, <<>>)
+}
+
+fn recv_until_closed_loop(
+  socket: connection.Socket,
+  acc: BitArray,
+) -> BitArray {
+  case connection.recv(socket, 0, 1000) {
+    Ok(bytes) -> recv_until_closed_loop(socket, <<acc:bits, bytes:bits>>)
+    Error(_) -> acc
+  }
 }

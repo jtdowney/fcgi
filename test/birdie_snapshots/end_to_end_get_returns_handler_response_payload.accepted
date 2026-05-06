@@ -1,10 +1,10 @@
 ---
-version: 1.6.0
+version: 2.0.0
 title: end_to_end_get_returns_handler_response_payload
 file: ./test/fcgi_test.gleam
 test_name: end_to_end_get_returns_handler_body_test
 ---
-Status: 200 OK
+Status: 200
 content-type: text/plain
 
 ok

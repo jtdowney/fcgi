@@ -1,0 +1,10 @@
+---
+version: 2.0.0
+title: content_length_non_numeric_returns_400_payload
+file: ./test/fcgi_test.gleam
+test_name: content_length_non_numeric_returns_400_test
+---
+Status: 400
+content-type: text/plain; charset=utf-8
+
+invalid CONTENT_LENGTH: abc

@@ -12,6 +12,22 @@ const max_body: Int = 1_048_576
 
 const max_params: Int = 65_536
 
+fn response_payload_string(
+  resp: response.Response(fcgi.ResponseData),
+) -> String {
+  let assert fcgi.Bytes(tree) = resp.body
+  let bytes =
+    bytes_tree.new()
+    |> bytes_tree.append_tree(handler.encode_response_header(1, resp))
+    |> bytes_tree.append_tree(handler.encode_response_body_tree(1, tree))
+    |> bytes_tree.append_tree(handler.encode_response_terminator(1))
+    |> bytes_tree.to_bit_array
+  let assert Ok(records) = helpers.decode_all_records(bytes)
+  let stdout_bytes = helpers.collect_stdout(records)
+  let assert Ok(payload) = bit_array.to_string(stdout_bytes)
+  payload
+}
+
 pub fn assembles_simple_request_test() {
   let bytes =
     helpers.request_stream_bytes(
@@ -84,7 +100,7 @@ pub fn body_overflow_drops_subsequent_chunks_test() {
     )
 
   let assert handler.Receiving(_, partial) = outcome.state
-  assert partial.stdin_overflow == True
+  assert partial.overflow == True
   assert bit_array.byte_size(partial.stdin) == 0
 }
 
@@ -372,8 +388,8 @@ pub fn get_values_returns_capabilities_test() {
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
   let assert protocol.GetValuesResult(pairs) = record
   assert rest == <<>>
-  assert list.key_find(pairs, "FCGI_MAX_CONNS") == Ok("1")
-  assert list.key_find(pairs, "FCGI_MAX_REQS") == Ok("1")
+  assert list.key_find(pairs, "FCGI_MAX_CONNS") == Ok("1000")
+  assert list.key_find(pairs, "FCGI_MAX_REQS") == Ok("1000")
   assert list.key_find(pairs, "FCGI_MPXS_CONNS") == Ok("0")
   assert list.length(pairs) == 3
   assert outcome.action == handler.WaitForMore
@@ -637,7 +653,8 @@ pub fn get_values_filters_unknown_names_test() {
 
   let assert helpers.OutgoingParsed(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
-  assert record == protocol.GetValuesResult(pairs: [#("FCGI_MAX_CONNS", "1")])
+  assert record
+    == protocol.GetValuesResult(pairs: [#("FCGI_MAX_CONNS", "1000")])
   assert rest == <<>>
 }
 
@@ -855,7 +872,7 @@ pub fn get_values_followed_by_request_drains_buffered_records_test() {
   let assert helpers.OutgoingParsed(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
   let assert protocol.GetValuesResult(pairs) = record
-  assert list.key_find(pairs, "FCGI_MAX_CONNS") == Ok("1")
+  assert list.key_find(pairs, "FCGI_MAX_CONNS") == Ok("1000")
   assert rest == <<>>
 }
 
@@ -982,30 +999,4 @@ pub fn drops_response_headers_with_crlf_in_name_test() {
     response_payload_string(resp),
     "drops_response_headers_with_crlf_in_name",
   )
-}
-
-pub fn unknown_response_status_omits_trailing_space_test() {
-  let resp =
-    response.new(799)
-    |> response.set_body(fcgi.Bytes(bytes_tree.new()))
-  birdie.snap(
-    response_payload_string(resp),
-    "unknown_response_status_omits_trailing_space",
-  )
-}
-
-fn response_payload_string(
-  resp: response.Response(fcgi.ResponseData),
-) -> String {
-  let assert fcgi.Bytes(tree) = resp.body
-  let bytes =
-    bytes_tree.new()
-    |> bytes_tree.append_tree(handler.encode_response_header(1, resp))
-    |> bytes_tree.append_tree(handler.encode_response_body_tree(1, tree))
-    |> bytes_tree.append_tree(handler.encode_response_terminator(1))
-    |> bytes_tree.to_bit_array
-  let assert Ok(records) = helpers.decode_all_records(bytes)
-  let stdout_bytes = helpers.collect_stdout(records)
-  let assert Ok(payload) = bit_array.to_string(stdout_bytes)
-  payload
 }

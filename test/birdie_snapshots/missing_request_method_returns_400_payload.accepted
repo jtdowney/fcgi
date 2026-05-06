@@ -1,10 +1,10 @@
 ---
-version: 1.6.0
+version: 2.0.0
 title: missing_request_method_returns_400_payload
 file: ./test/fcgi_test.gleam
 test_name: missing_request_method_returns_400_test
 ---
-Status: 400 Bad Request
+Status: 400
 content-type: text/plain; charset=utf-8
 
 missing REQUEST_METHOD parameter

@@ -1,9 +1,0 @@
----
-version: 1.6.0
-title: unknown_response_status_omits_trailing_space
-file: ./test/fcgi/internal/handler_test.gleam
-test_name: unknown_response_status_omits_trailing_space_test
----
-Status: 799
-
-

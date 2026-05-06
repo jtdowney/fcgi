@@ -1,25 +1,23 @@
 import fcgi
 import fcgi/wisp_fcgi
 import gleam/erlang/process
-import gleam/int
 import gleam/io
 import wisp
+
+const socket_path = "/tmp/fcgi_wisp_hello.sock"
 
 pub fn main() -> Nil {
   wisp.configure_logger()
   let secret_key_base = wisp.random_string(64)
 
-  let assert Ok(started) =
+  let assert Ok(_) =
     handle_request
     |> wisp_fcgi.handler(secret_key_base)
     |> fcgi.new
-    |> fcgi.bind("127.0.0.1")
-    |> fcgi.port(9000)
+    |> fcgi.listen_path(socket_path)
     |> fcgi.start
 
-  io.println(
-    "Listening on 127.0.0.1:" <> int.to_string(fcgi.bound_port(started)),
-  )
+  io.println("Listening on unix:" <> socket_path)
   process.sleep_forever()
 }
 

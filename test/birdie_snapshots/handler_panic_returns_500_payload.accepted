@@ -1,0 +1,10 @@
+---
+version: 2.0.0
+title: handler_panic_returns_500_payload
+file: ./test/fcgi_test.gleam
+test_name: handler_panic_returns_500_response_test
+---
+Status: 500
+content-type: text/plain; charset=utf-8
+
+internal server error
