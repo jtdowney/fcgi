@@ -3,7 +3,7 @@
 [![Package Version](https://img.shields.io/hexpm/v/fcgi)](https://hex.pm/packages/fcgi)
 [![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/fcgi/)
 
-A FastCGI Responder server for Gleam, designed to sit behind a reverse proxy such as Caddy. Speaks the FastCGI Responder role over a Unix domain socket and exposes a `gleam/http`-shaped handler API plus a Wisp adapter.
+A FastCGI Responder server for Gleam, designed to sit behind a reverse proxy such as Caddy. Speaks the FastCGI Responder role over a Unix domain socket and exposes a `gleam/http`-shaped handler API.
 
 ## Installation
 
@@ -40,11 +40,15 @@ fn handle_request(
 
 ## Usage with Wisp
 
+A working Wisp adapter lives in [`examples/wisp_hello`](examples/wisp_hello). Copy
+`examples/wisp_hello/src/wisp_fcgi.gleam` into your own project alongside the
+`wisp` dependency, then wire it up:
+
 ```gleam
 import fcgi
-import fcgi/wisp_fcgi
 import gleam/erlang/process
 import wisp
+import wisp_fcgi
 
 pub fn main() {
   let secret_key_base = wisp.random_string(64)

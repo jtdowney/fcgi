@@ -57,7 +57,6 @@ fn wrap_chunk(
   })
 }
 
-@internal
 pub fn map_response(
   response: wisp.Response,
 ) -> HttpResponse(fcgi.ResponseData) {

@@ -1,8 +1,8 @@
 import fcgi
-import fcgi/wisp_fcgi
 import gleam/erlang/process
 import gleam/io
 import wisp
+import wisp_fcgi
 
 const socket_path = "/tmp/fcgi_wisp_hello.sock"
 
