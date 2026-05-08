@@ -535,7 +535,8 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
   let real_params =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")]),
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))

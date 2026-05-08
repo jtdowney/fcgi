@@ -2,6 +2,7 @@ import fcgi/internal/connection
 import fcgi/internal/protocol
 import gleam/bit_array
 import gleam/bool
+import gleam/bytes_tree
 import gleam/list
 import temporary
 
@@ -36,7 +37,9 @@ pub fn request_stream_bytes(
       role: protocol.responder_role,
       keep_conn:,
     ))
-  let params_data = protocol.encode_name_value_pairs(params)
+  let params_data =
+    protocol.encode_name_value_pairs(params)
+    |> bytes_tree.to_bit_array
   let params_record =
     protocol.encode_incoming(protocol.Params(request_id:, data: params_data))
   let params_end =

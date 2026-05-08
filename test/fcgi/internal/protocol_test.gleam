@@ -164,7 +164,7 @@ pub fn name_value_pairs_round_trip_test() {
     qcheck.default_config() |> qcheck.with_test_count(100),
     name_value_pairs_generator(),
   )
-  let bytes = protocol.encode_name_value_pairs(pairs)
+  let bytes = protocol.encode_name_value_pairs(pairs) |> bytes_tree.to_bit_array
   let assert Ok(decoded) = protocol.parse_name_value_pairs(bytes)
   assert decoded == pairs
 }
@@ -176,7 +176,7 @@ pub fn name_value_pairs_round_trip_unicode_test() {
     #("party", "🎉🎊"),
     #("名前", "値"),
   ]
-  let bytes = protocol.encode_name_value_pairs(pairs)
+  let bytes = protocol.encode_name_value_pairs(pairs) |> bytes_tree.to_bit_array
   let assert Ok(decoded) = protocol.parse_name_value_pairs(bytes)
   assert decoded == pairs
 }

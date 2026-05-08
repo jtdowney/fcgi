@@ -188,7 +188,8 @@ pub fn read_chunk_returns_timeout_when_stdin_stalls_test() {
         #("REQUEST_METHOD", "POST"),
         #("SERVER_NAME", "localhost"),
         #("PATH_INFO", "/"),
-      ]),
+      ])
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))

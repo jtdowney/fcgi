@@ -49,7 +49,8 @@ pub fn assembles_simple_request_test() {
     == [
       handler.Start(
         request_id: 1,
-        params: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")]),
+        params: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+          |> bytes_tree.to_bit_array,
         keep_conn: False,
       ),
       handler.BodyEnd,
@@ -86,7 +87,8 @@ pub fn body_too_large_after_start_emits_event_test() {
   let real_params =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")]),
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
@@ -172,7 +174,8 @@ pub fn params_overflow_emits_overloaded_test() {
   let params_record =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs(huge_pairs),
+      data: protocol.encode_name_value_pairs(huge_pairs)
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
@@ -438,12 +441,14 @@ pub fn split_params_records_concatenate_test() {
   let params_part_one =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")]),
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
     ))
   let params_part_two =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs([#("PATH_INFO", "/x")]),
+      data: protocol.encode_name_value_pairs([#("PATH_INFO", "/x")])
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
@@ -472,7 +477,8 @@ pub fn split_params_records_concatenate_test() {
         params: protocol.encode_name_value_pairs([
           #("REQUEST_METHOD", "POST"),
           #("PATH_INFO", "/x"),
-        ]),
+        ])
+          |> bytes_tree.to_bit_array,
         keep_conn: False,
       ),
       handler.BodyEnd,
@@ -489,7 +495,8 @@ pub fn split_stdin_records_emit_separate_chunks_test() {
   let real_params =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")]),
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
@@ -540,7 +547,8 @@ pub fn stdin_before_params_is_buffered_into_first_chunk_test() {
   let real_params =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")]),
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
@@ -577,7 +585,8 @@ pub fn terminators_arriving_in_separate_feeds_test() {
   let real_params =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")]),
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
@@ -604,7 +613,10 @@ pub fn terminators_arriving_in_separate_feeds_test() {
   assert outcome_two.continuation == handler.WaitForMore
   let assert [handler.Start(1, params_buffer, False)] = outcome_two.events
   assert params_buffer
-    == protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+    == {
+      protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+      |> bytes_tree.to_bit_array
+    }
 
   let outcome_three =
     handler.feed(
@@ -690,12 +702,14 @@ pub fn mismatched_params_id_is_ignored_test() {
   let stray_params =
     protocol.encode_incoming(protocol.Params(
       request_id: 2,
-      data: protocol.encode_name_value_pairs([#("STRAY", "yes")]),
+      data: protocol.encode_name_value_pairs([#("STRAY", "yes")])
+        |> bytes_tree.to_bit_array,
     ))
   let real_params =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")]),
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
@@ -720,7 +734,10 @@ pub fn mismatched_params_id_is_ignored_test() {
   let assert [handler.Start(1, params_buffer, False), handler.BodyEnd] =
     outcome.events
   assert params_buffer
-    == protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+    == {
+      protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+      |> bytes_tree.to_bit_array
+    }
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
 
@@ -734,7 +751,8 @@ pub fn mismatched_stdin_id_is_ignored_test() {
   let real_params =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")]),
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
@@ -785,7 +803,8 @@ pub fn mismatched_abort_id_is_ignored_test() {
   let real_params =
     protocol.encode_incoming(protocol.Params(
       request_id: 1,
-      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")]),
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+        |> bytes_tree.to_bit_array,
     ))
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
@@ -834,7 +853,10 @@ pub fn get_values_followed_by_request_drains_buffered_records_test() {
   let assert [handler.Start(7, params_buffer, False), handler.BodyEnd] =
     outcome.events
   assert params_buffer
-    == protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+    == {
+      protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+      |> bytes_tree.to_bit_array
+    }
 
   let assert helpers.OutgoingParsed(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
@@ -906,7 +928,10 @@ pub fn feed_resumes_across_partial_records_test() {
   let assert [handler.Start(1, params_buffer, False), handler.BodyEnd] =
     outcome_two.events
   assert params_buffer
-    == protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+    == {
+      protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+      |> bytes_tree.to_bit_array
+    }
 }
 
 pub fn writes_bytes_response_with_cgi_header_block_test() {

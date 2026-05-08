@@ -44,7 +44,7 @@ pub fn encode_incoming(record: Incoming) -> BitArray {
     Stdin(id, data) -> frame_bits(5, id, data)
     GetValues(names) -> {
       let pairs = list.map(names, fn(name) { #(name, "") })
-      frame_bits(9, 0, encode_name_value_pairs(pairs))
+      frame_tree(9, 0, encode_name_value_pairs(pairs))
     }
     IncomingUnknown(id, type_byte) -> frame_bits(type_byte, id, <<>>)
   }
@@ -52,20 +52,18 @@ pub fn encode_incoming(record: Incoming) -> BitArray {
   bytes_tree.to_bit_array(tree)
 }
 
-pub fn encode_name_value_pairs(pairs: List(#(String, String))) -> BitArray {
-  list.fold(pairs, <<>>, fn(acc, pair) {
+pub fn encode_name_value_pairs(pairs: List(#(String, String))) -> BytesTree {
+  list.fold(pairs, bytes_tree.new(), fn(acc, pair) {
     let #(name, value) = pair
     let name_bytes = bit_array.from_string(name)
     let value_bytes = bit_array.from_string(value)
     let name_length = bit_array.byte_size(name_bytes)
     let value_length = bit_array.byte_size(value_bytes)
-    <<
-      acc:bits,
-      encode_length(name_length):bits,
-      encode_length(value_length):bits,
-      name_bytes:bits,
-      value_bytes:bits,
-    >>
+    acc
+    |> bytes_tree.append(encode_length(name_length))
+    |> bytes_tree.append(encode_length(value_length))
+    |> bytes_tree.append(name_bytes)
+    |> bytes_tree.append(value_bytes)
   })
 }
 
@@ -80,7 +78,7 @@ pub fn encode_record(record: Outgoing) -> BytesTree {
       frame_bits(3, id, body)
     }
     Stdout(id, data) -> frame_bits(6, id, data)
-    GetValuesResult(pairs) -> frame_bits(10, 0, encode_name_value_pairs(pairs))
+    GetValuesResult(pairs) -> frame_tree(10, 0, encode_name_value_pairs(pairs))
     UnknownType(type_byte) -> {
       let body = <<type_byte:size(8), 0:size(56)>>
       frame_bits(11, 0, body)
