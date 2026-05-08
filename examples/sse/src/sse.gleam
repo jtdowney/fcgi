@@ -31,9 +31,7 @@ pub fn main() -> Nil {
   process.sleep_forever()
 }
 
-fn handle_request(
-  req: Request(fcgi.Connection),
-) -> Response(fcgi.ResponseData) {
+fn handle_request(req: Request(fcgi.Body)) -> Response(fcgi.ResponseData) {
   case request.path_segments(req) {
     [] -> serve_static_file("static/index.html", "text/html; charset=utf-8")
     ["static", "app.js"] ->
@@ -66,7 +64,7 @@ fn events_stream() -> Response(fcgi.ResponseData) {
   |> response.set_header("content-type", "text/event-stream")
   |> response.set_header("cache-control", "no-cache")
   |> response.set_header("x-accel-buffering", "no")
-  |> response.set_body(fcgi.Stream(producer))
+  |> response.set_body(fcgi.stream(producer))
 }
 
 fn emit_events(sender: fcgi.StreamSender, n: Int) -> Nil {
@@ -93,5 +91,5 @@ fn emit_events(sender: fcgi.StreamSender, n: Int) -> Nil {
 fn not_found() -> Response(fcgi.ResponseData) {
   response.new(404)
   |> response.set_header("content-type", "text/plain; charset=utf-8")
-  |> response.set_body(fcgi.Bytes(bytes_tree.from_string("not found\n")))
+  |> response.set_body(fcgi.bytes(bytes_tree.from_string("not found\n")))
 }

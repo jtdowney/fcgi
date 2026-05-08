@@ -30,11 +30,11 @@ pub fn main() {
 }
 
 fn handle_request(
-  _request: Request(fcgi.Connection),
+  _request: Request(fcgi.Body),
 ) -> Response(fcgi.ResponseData) {
   response.new(200)
   |> response.set_header("content-type", "text/plain; charset=utf-8")
-  |> response.set_body(fcgi.Bytes(bytes_tree.from_string("hello, joe!")))
+  |> response.set_body(fcgi.bytes(bytes_tree.from_string("hello, joe!")))
 }
 ```
 

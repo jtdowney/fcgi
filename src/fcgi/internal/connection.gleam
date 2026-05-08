@@ -5,10 +5,8 @@ import gleam/bit_array
 import gleam/bool
 import gleam/bytes_tree.{type BytesTree}
 import gleam/dict.{type Dict}
-import gleam/dynamic.{type Dynamic}
-import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}
-import gleam/erlang/process.{type Pid}
+import gleam/erlang/process
 import gleam/http
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
@@ -22,6 +20,14 @@ import gleam/string
 const file_chunk_size: Int = 65_535
 
 const max_params_size: Int = 262_144
+
+const init_recv_timeout_ms: Int = 60_000
+
+const fcgi_version: Int = 1
+
+const fcgi_stdout_type: Int = 6
+
+const fcgi_padding_modulus: Int = 8
 
 pub type Socket
 
@@ -46,7 +52,10 @@ pub fn accept(listen: Socket) -> Result(Socket, SocketError)
 pub fn close_socket(socket: Socket) -> Nil
 
 @external(erlang, "fcgi_ffi", "controlling_process")
-pub fn controlling_process(socket: Socket, pid: Pid) -> Result(Nil, SocketError)
+pub fn controlling_process(
+  socket: Socket,
+  pid: process.Pid,
+) -> Result(Nil, SocketError)
 
 @external(erlang, "fcgi_ffi", "delete_path")
 pub fn delete_path(path: String) -> Nil
@@ -64,38 +73,23 @@ pub fn recv(
 @external(erlang, "fcgi_ffi", "send")
 pub fn send(socket: Socket, data: BitArray) -> Result(Nil, SocketError)
 
-@external(erlang, "fcgi_ffi", "setopts_active_once")
-pub fn setopts_active_once(socket: Socket) -> Result(Nil, SocketError)
-
-@external(erlang, "fcgi_ffi", "close")
+@external(erlang, "fcgi_ffi", "close_file")
 pub fn close_file(handle: Handle) -> Nil
 
-@external(erlang, "fcgi_ffi", "open")
-pub fn open_file(path: String) -> Result(Handle, FileError)
+@external(erlang, "fcgi_ffi", "open_and_size")
+pub fn open_and_size(path: String) -> Result(#(Handle, Int), FileError)
 
-@external(erlang, "fcgi_ffi", "pread")
-fn pread(
+@external(erlang, "fcgi_ffi", "sendfile")
+fn sendfile(
   handle: Handle,
-  offset offset: Int,
-  size size: Int,
-) -> Result(BitArray, FileError)
-
-@external(erlang, "fcgi_ffi", "validate_file")
-pub fn validate_file(path: String) -> Result(Nil, FileError)
-
-pub type Connection {
-  Connection(body: BitArray)
-}
-
-type Message {
-  Tcp(data: BitArray)
-  TcpClosed
-  TcpError(reason: String)
-}
+  socket: Socket,
+  offset: Int,
+  bytes: Int,
+) -> Result(Int, FileError)
 
 pub type ResponseData {
   Bytes(content: BytesTree)
-  File(path: String, offset: Int, limit: Option(Int))
+  File(handle: Handle, offset: Int, length: Int)
   Stream(producer: fn(StreamSender) -> Nil)
 }
 
@@ -103,7 +97,8 @@ pub type Spec {
   Spec(
     socket: Socket,
     max_body_size: Int,
-    handler: fn(Request(Connection)) -> Response(ResponseData),
+    body_read_timeout_ms: Int,
+    handler: fn(Request(Nil), BodyReader) -> Response(ResponseData),
   )
 }
 
@@ -111,18 +106,35 @@ pub opaque type StreamSender {
   StreamSender(emit: fn(BitArray) -> Result(Nil, Nil))
 }
 
-type PreparedResponseBody {
-  PreparedBytes(data: BytesTree)
-  PreparedStream(producer: fn(StreamSender) -> Nil)
+pub type BodyReader =
+  fn() -> Result(BodyRead, BodyReadError)
+
+pub type BodyRead {
+  BodyMore(data: BitArray, next: BodyReader)
+  BodyEnded
 }
 
-type State {
-  State(
+pub type BodyReadError {
+  ConnectionLost
+  Timeout
+  TooLarge
+}
+
+type BodyContext {
+  BodyContext(
     socket: Socket,
-    handler_state: handler.State,
+    state: handler.State,
+    pending: BitArray,
+    finished: Bool,
+    overflowed: Bool,
     max_body_size: Int,
-    handler: fn(Request(Connection)) -> Response(ResponseData),
+    timeout_ms: Int,
+    tracker: process.Subject(StateSnapshot),
   )
+}
+
+type StateSnapshot {
+  StateSnapshot(state: handler.State, finished: Bool, overflowed: Bool)
 }
 
 pub fn send_chunk(sender: StreamSender, data: BitArray) -> Result(Nil, Nil) {
@@ -131,157 +143,335 @@ pub fn send_chunk(sender: StreamSender, data: BitArray) -> Result(Nil, Nil) {
 }
 
 pub fn start(spec: Spec) -> actor.StartResult(Nil) {
-  actor.new_with_initialiser(1000, fn(_subject) {
-    let initial_state =
-      State(
-        socket: spec.socket,
-        handler_state: handler.new(),
-        max_body_size: spec.max_body_size,
-        handler: spec.handler,
-      )
-    let selector = build_selector()
-    actor.initialised(initial_state)
+  actor.new_with_initialiser(1000, fn(self_subject) {
+    process.send(self_subject, Nil)
+    let selector = process.new_selector() |> process.select(self_subject)
+    actor.initialised(spec)
     |> actor.selecting(selector)
     |> actor.returning(Nil)
     |> Ok
   })
-  |> actor.on_message(handle_message)
+  |> actor.on_message(fn(spec, _msg) {
+    run_connection(spec)
+    actor.stop()
+  })
   |> actor.start
 }
 
-fn build_selector() -> process.Selector(Message) {
-  process.new_selector()
-  |> process.select_record(atom.create("tcp"), 2, decode_tcp)
-  |> process.select_record(atom.create("tcp_closed"), 1, fn(_) { TcpClosed })
-  |> process.select_record(atom.create("tcp_error"), 2, decode_tcp_error)
+fn run_connection(spec: Spec) -> Nil {
+  run_connection_loop(spec, handler.new(), <<>>)
+  close_socket(spec.socket)
 }
 
-fn decode_tcp(message: Dynamic) -> Message {
-  case decode.run(message, decode.at([2], decode.bit_array)) {
-    Ok(data) -> Tcp(data)
-    Error(_) -> TcpError("malformed tcp message")
-  }
-}
-
-fn decode_tcp_error(message: Dynamic) -> Message {
-  TcpError(string.inspect(message))
-}
-
-fn handle_message(
-  state: State,
-  message: Message,
-) -> actor.Next(State, Message) {
-  case message {
-    Tcp(data) -> handle_tcp(state, data)
-    _ -> {
-      close_socket(state.socket)
-      actor.stop()
+fn run_connection_loop(
+  spec: Spec,
+  state: handler.State,
+  pending: BitArray,
+) -> Nil {
+  let tracker = process.new_subject()
+  case feed_until_request_or_end(spec, state, pending) {
+    FeedReachedEnd -> Nil
+    FeedReachedRequest(fsm_state, request_id, params, body_queue, keep_conn) -> {
+      handle_one_request(
+        spec,
+        tracker,
+        fsm_state,
+        request_id,
+        params,
+        body_queue,
+      )
+      case keep_conn {
+        False -> Nil
+        True ->
+          case finalize_request(spec, tracker) {
+            Error(_) -> Nil
+            Ok(next_state) -> run_connection_loop(spec, next_state, <<>>)
+          }
+      }
     }
   }
 }
 
-fn handle_tcp(state: State, data: BitArray) -> actor.Next(State, Message) {
+type FeedOutcome {
+  FeedReachedRequest(
+    fsm_state: handler.State,
+    request_id: Int,
+    params: BitArray,
+    body_queue: List(handler.Event),
+    keep_conn: Bool,
+  )
+  FeedReachedEnd
+}
+
+fn feed_until_request_or_end(
+  spec: Spec,
+  fsm_state: handler.State,
+  pending: BitArray,
+) -> FeedOutcome {
   let outcome =
     handler.feed(
-      state.handler_state,
-      bytes: data,
-      max_body_size: state.max_body_size,
+      fsm_state,
+      bytes: pending,
+      max_body_size: spec.max_body_size,
       max_params_size:,
     )
-  let _ = send_if_nonempty(state.socket, outcome.outgoing)
-  drive_outcome(state, outcome)
-}
-
-fn drive_outcome(
-  state: State,
-  outcome: handler.Outcome,
-) -> actor.Next(State, Message) {
-  case outcome.action {
-    handler.WaitForMore -> {
-      let _ = setopts_active_once(state.socket)
-      actor.continue(State(..state, handler_state: outcome.state))
-    }
-    handler.CloseConnection -> {
-      close_socket(state.socket)
-      actor.stop()
-    }
-    handler.ReadyForHandler(request_id, params_bytes, body, keep_conn) -> {
-      run_handler(state, request_id, params_bytes, body)
-      pump_after_handler_loop(
-        State(..state, handler_state: outcome.state),
-        keep_conn,
+  let _ = send_if_nonempty(spec.socket, outcome.outgoing)
+  case extract_start(outcome.events) {
+    option.Some(#(request_id, params, keep_conn, queue)) ->
+      FeedReachedRequest(
+        fsm_state: outcome.state,
+        request_id:,
+        params:,
+        body_queue: queue,
+        keep_conn:,
       )
-    }
+    option.None ->
+      case outcome.continuation {
+        handler.CloseConnection -> FeedReachedEnd
+        handler.WaitForMore ->
+          case recv(spec.socket, 0, init_recv_timeout_ms) {
+            Error(_) -> FeedReachedEnd
+            Ok(<<>>) -> FeedReachedEnd
+            Ok(more) -> feed_until_request_or_end(spec, outcome.state, more)
+          }
+      }
   }
 }
 
-fn pump_after_handler_loop(
-  state: State,
-  keep_conn: Bool,
-) -> actor.Next(State, Message) {
-  case keep_conn {
-    False -> {
-      close_socket(state.socket)
-      actor.stop()
-    }
-    True -> {
-      let outcome =
-        handler.feed(
-          state.handler_state,
-          bytes: <<>>,
-          max_body_size: state.max_body_size,
-          max_params_size:,
-        )
-      let _ = send_if_nonempty(state.socket, outcome.outgoing)
-      drive_outcome(state, outcome)
-    }
+fn extract_start(
+  events: List(handler.Event),
+) -> Option(#(Int, BitArray, Bool, List(handler.Event))) {
+  case events {
+    [handler.Start(request_id, params, keep_conn), ..rest] ->
+      option.Some(#(request_id, params, keep_conn, rest))
+    [_, ..rest] -> extract_start(rest)
+    [] -> option.None
   }
 }
 
-fn run_handler(
-  state: State,
+fn handle_one_request(
+  spec: Spec,
+  tracker: process.Subject(StateSnapshot),
+  fsm_state: handler.State,
   request_id: Int,
-  params_bytes: BitArray,
-  body: BitArray,
+  params: BitArray,
+  body_queue: List(handler.Event),
 ) -> Nil {
-  let response = case build_request(params_bytes, body) {
-    Ok(req) -> safe_invoke_handler(state.handler, req)
-    Error(message) -> error_response(400, message)
+  use <- bool.lazy_guard(
+    when: list.contains(body_queue, handler.BodyTooLarge),
+    return: fn() { send_overloaded(spec.socket, request_id) },
+  )
+  case build_request(params) {
+    Error(message) -> {
+      let response = error_response(400, message)
+      send_response(spec.socket, request_id, response)
+    }
+    Ok(req) -> {
+      let reader = make_initial_reader(spec, tracker, fsm_state, body_queue)
+      let response = run_user_handler(spec.handler, req, reader)
+      send_response(spec.socket, request_id, response)
+    }
   }
-  let #(final_response, prepared) = prepare_or_fallback(response)
-  let _ =
-    send_if_nonempty(
-      state.socket,
-      handler.encode_response_header(request_id, final_response),
-    )
-  send_prepared_body(state.socket, request_id, prepared)
-  let _ =
-    send_if_nonempty(
-      state.socket,
-      handler.encode_response_terminator(request_id),
-    )
+}
+
+fn send_overloaded(socket: Socket, request_id: Int) -> Nil {
+  let _ = send_if_nonempty(socket, handler.encode_overloaded_end(request_id))
   Nil
 }
 
-fn safe_invoke_handler(
-  handler_fn: fn(Request(Connection)) -> Response(ResponseData),
-  req: Request(Connection),
+fn finalize_request(
+  spec: Spec,
+  tracker: process.Subject(StateSnapshot),
+) -> Result(handler.State, Nil) {
+  use initial <- result.try(
+    process.receive(tracker, 0)
+    |> result.replace_error(Nil),
+  )
+  let final = drain_tracker_loop(tracker, initial)
+  drain_body_loop(spec, final)
+}
+
+fn drain_tracker_loop(
+  tracker: process.Subject(StateSnapshot),
+  latest: StateSnapshot,
+) -> StateSnapshot {
+  case process.receive(tracker, 0) {
+    Error(_) -> latest
+    Ok(snap) -> drain_tracker_loop(tracker, snap)
+  }
+}
+
+fn drain_body_loop(
+  spec: Spec,
+  snap: StateSnapshot,
+) -> Result(handler.State, Nil) {
+  use <- bool.guard(when: snap.overflowed, return: Error(Nil))
+  use <- bool.guard(when: snap.finished, return: Ok(snap.state))
+  case recv(spec.socket, 0, spec.body_read_timeout_ms) {
+    Error(_) -> Error(Nil)
+    Ok(<<>>) -> Error(Nil)
+    Ok(more) -> {
+      let outcome =
+        handler.feed(
+          snap.state,
+          bytes: more,
+          max_body_size: spec.max_body_size,
+          max_params_size:,
+        )
+      let _ = send_if_nonempty(spec.socket, outcome.outgoing)
+      let #(_data, ended, overflowed) =
+        collect_body_events(outcome.events, <<>>, False, False)
+      let next =
+        StateSnapshot(
+          state: outcome.state,
+          finished: snap.finished || ended,
+          overflowed: snap.overflowed || overflowed,
+        )
+      drain_body_loop(spec, next)
+    }
+  }
+}
+
+fn run_user_handler(
+  handler_fn: fn(Request(Nil), BodyReader) -> Response(ResponseData),
+  req: Request(Nil),
+  reader: BodyReader,
 ) -> Response(ResponseData) {
-  case exception.rescue(fn() { handler_fn(req) }) {
+  case exception.rescue(fn() { handler_fn(req, reader) }) {
     Ok(resp) -> resp
     Error(_) -> error_response(500, "internal server error")
   }
 }
 
-fn prepare_or_fallback(
+fn make_initial_reader(
+  spec: Spec,
+  tracker: process.Subject(StateSnapshot),
+  state: handler.State,
+  body_queue: List(handler.Event),
+) -> BodyReader {
+  let #(initial_data, initial_done, initial_overflow) =
+    collect_body_events(body_queue, <<>>, False, False)
+  let ctx =
+    BodyContext(
+      socket: spec.socket,
+      state:,
+      pending: initial_data,
+      finished: initial_done,
+      overflowed: initial_overflow,
+      max_body_size: spec.max_body_size,
+      timeout_ms: spec.body_read_timeout_ms,
+      tracker:,
+    )
+  put_snapshot(ctx)
+  reader_for(ctx)
+}
+
+fn put_snapshot(ctx: BodyContext) -> Nil {
+  process.send(
+    ctx.tracker,
+    StateSnapshot(
+      state: ctx.state,
+      finished: ctx.finished,
+      overflowed: ctx.overflowed,
+    ),
+  )
+}
+
+fn reader_for(ctx: BodyContext) -> BodyReader {
+  fn() { read_step(ctx) }
+}
+
+fn read_step(ctx: BodyContext) -> Result(BodyRead, BodyReadError) {
+  use <- bool.guard(when: ctx.overflowed, return: Error(TooLarge))
+  let pending_size = bit_array.byte_size(ctx.pending)
+  case pending_size, ctx.finished {
+    0, True -> Ok(BodyEnded)
+    0, False -> pull_more(ctx)
+    _, _ -> deliver_pending(ctx)
+  }
+}
+
+fn deliver_pending(ctx: BodyContext) -> Result(BodyRead, BodyReadError) {
+  let next_ctx = BodyContext(..ctx, pending: <<>>)
+  put_snapshot(next_ctx)
+  Ok(BodyMore(data: ctx.pending, next: reader_for(next_ctx)))
+}
+
+fn pull_more(ctx: BodyContext) -> Result(BodyRead, BodyReadError) {
+  case recv(ctx.socket, 0, ctx.timeout_ms) {
+    Error(error) -> Error(classify_recv_error(error))
+    Ok(<<>>) -> Error(ConnectionLost)
+    Ok(more) -> {
+      let outcome =
+        handler.feed(
+          ctx.state,
+          bytes: more,
+          max_body_size: ctx.max_body_size,
+          max_params_size:,
+        )
+      let _ = send_if_nonempty(ctx.socket, outcome.outgoing)
+      let #(new_data, ended, overflowed) =
+        collect_body_events(outcome.events, <<>>, False, False)
+      let next_ctx =
+        BodyContext(
+          ..ctx,
+          state: outcome.state,
+          pending: <<ctx.pending:bits, new_data:bits>>,
+          finished: ctx.finished || ended,
+          overflowed: ctx.overflowed || overflowed,
+        )
+      put_snapshot(next_ctx)
+      read_step(next_ctx)
+    }
+  }
+}
+
+fn classify_recv_error(error: SocketError) -> BodyReadError {
+  case error {
+    Posix(reason) ->
+      case atom.to_string(reason) {
+        "timeout" -> Timeout
+        _ -> ConnectionLost
+      }
+    _ -> ConnectionLost
+  }
+}
+
+fn collect_body_events(
+  events: List(handler.Event),
+  data: BitArray,
+  ended: Bool,
+  overflowed: Bool,
+) -> #(BitArray, Bool, Bool) {
+  case events {
+    [] -> #(data, ended, overflowed)
+    [handler.BodyChunk(chunk), ..rest] ->
+      collect_body_events(rest, <<data:bits, chunk:bits>>, ended, overflowed)
+    [handler.BodyEnd, ..rest] ->
+      collect_body_events(rest, data, True, overflowed)
+    [handler.BodyTooLarge, ..rest] ->
+      collect_body_events(rest, data, True, True)
+    [handler.Start(_, _, _), ..rest] ->
+      collect_body_events(rest, data, ended, overflowed)
+  }
+}
+
+fn send_response(
+  socket: Socket,
+  request_id: Int,
   response: Response(ResponseData),
-) -> #(Response(ResponseData), PreparedResponseBody) {
-  case prepare_response_body(response.body) {
-    Ok(prepared) -> #(response, prepared)
-    Error(_) -> {
-      let message = "could not open response file"
-      let fallback = error_response(500, message)
-      #(fallback, PreparedBytes(bytes_tree.from_string(message)))
+) -> Nil {
+  let _ =
+    send_if_nonempty(
+      socket,
+      handler.encode_response_header(request_id, response),
+    )
+  case send_response_body(socket, request_id, response.body) {
+    Error(_) -> Nil
+    Ok(_) -> {
+      let _ =
+        send_if_nonempty(socket, handler.encode_response_terminator(request_id))
+      Nil
     }
   }
 }
@@ -292,70 +482,25 @@ fn error_response(status: Int, message: String) -> Response(ResponseData) {
   |> response.set_body(Bytes(bytes_tree.from_string(message)))
 }
 
-fn prepare_response_body(
-  body: ResponseData,
-) -> Result(PreparedResponseBody, FileError) {
-  case body {
-    Bytes(tree) -> Ok(PreparedBytes(tree))
-    File(path, offset, limit) ->
-      open_file(path)
-      |> result.map(fn(handle) {
-        PreparedStream(fn(sender) {
-          let StreamSender(emit) = sender
-          stream_file(handle, offset:, remaining: limit, emit:)
-          close_file(handle)
-        })
-      })
-    Stream(producer) -> Ok(PreparedStream(producer))
-  }
-}
-
-pub fn stream_file(
-  handle: Handle,
-  offset offset: Int,
-  remaining remaining: Option(Int),
-  emit emit: fn(BitArray) -> Result(Nil, Nil),
-) -> Nil {
-  let to_read = case remaining {
-    option.None -> file_chunk_size
-    option.Some(n) -> int.min(n, file_chunk_size)
-  }
-  use <- bool.guard(when: to_read <= 0, return: Nil)
-  case pread(handle, offset:, size: to_read) {
-    Error(_) -> Nil
-    Ok(data) -> {
-      let bytes_read = bit_array.byte_size(data)
-      use <- bool.guard(when: bytes_read == 0, return: Nil)
-      case emit(data) {
-        Error(_) -> Nil
-        Ok(_) if bytes_read < to_read -> Nil
-        Ok(_) ->
-          stream_file(
-            handle,
-            offset: offset + bytes_read,
-            remaining: option.map(remaining, fn(n) { n - bytes_read }),
-            emit:,
-          )
-      }
-    }
-  }
-}
-
-fn send_prepared_body(
+fn send_response_body(
   socket: Socket,
   request_id: Int,
-  body: PreparedResponseBody,
-) -> Nil {
+  body: ResponseData,
+) -> Result(Nil, Nil) {
   case body {
-    PreparedBytes(data) -> {
+    Bytes(data) -> {
       let _ =
         send_if_nonempty(
           socket,
           handler.encode_response_body_tree(request_id, data),
         )
-      Nil
+      Ok(Nil)
     }
-    PreparedStream(producer) -> {
+    File(handle, offset, length) -> {
+      use <- exception.defer(fn() { close_file(handle) })
+      send_via_sendfile(socket, request_id, handle, offset, length)
+    }
+    Stream(producer) -> {
       let sender =
         StreamSender(emit: fn(data) {
           send_if_nonempty(
@@ -365,22 +510,95 @@ fn send_prepared_body(
           |> result.replace_error(Nil)
         })
       let _ = exception.rescue(fn() { producer(sender) })
-      Nil
+      Ok(Nil)
     }
   }
 }
 
-fn build_request(
-  params_bytes: BitArray,
-  body: BitArray,
-) -> Result(Request(Connection), String) {
+fn send_via_sendfile(
+  socket: Socket,
+  request_id: Int,
+  handle: Handle,
+  offset: Int,
+  remaining: Int,
+) -> Result(Nil, Nil) {
+  use <- bool.guard(when: remaining <= 0, return: Ok(Nil))
+
+  let chunk_size = int.min(remaining, file_chunk_size)
+  let padding_length = padding_for(chunk_size)
+  let header = encode_stdout_header(request_id, chunk_size, padding_length)
+  use _ <- result.try(
+    send(socket, header)
+    |> result.replace_error(Nil),
+  )
+  use _ <- result.try(drain_sendfile_loop(socket, handle, offset, chunk_size))
+  use _ <- result.try(
+    send_padding(socket, padding_length)
+    |> result.replace_error(Nil),
+  )
+  send_via_sendfile(
+    socket,
+    request_id,
+    handle,
+    offset + chunk_size,
+    remaining - chunk_size,
+  )
+}
+
+fn drain_sendfile_loop(
+  socket: Socket,
+  handle: Handle,
+  offset: Int,
+  remaining: Int,
+) -> Result(Nil, Nil) {
+  use <- bool.guard(when: remaining <= 0, return: Ok(Nil))
+  case sendfile(handle, socket, offset, remaining) {
+    Error(_) -> Error(Nil)
+    Ok(0) -> Error(Nil)
+    Ok(sent) ->
+      drain_sendfile_loop(socket, handle, offset + sent, remaining - sent)
+  }
+}
+
+fn encode_stdout_header(
+  request_id: Int,
+  content_length: Int,
+  padding_length: Int,
+) -> BitArray {
+  <<
+    fcgi_version:size(8),
+    fcgi_stdout_type:size(8),
+    request_id:size(16),
+    content_length:size(16),
+    padding_length:size(8),
+    0:size(8),
+  >>
+}
+
+fn send_padding(
+  socket: Socket,
+  padding_length: Int,
+) -> Result(Nil, SocketError) {
+  use <- bool.guard(when: padding_length == 0, return: Ok(Nil))
+  send(socket, <<0:size({ padding_length * 8 })>>)
+}
+
+fn padding_for(content_length: Int) -> Int {
+  let remainder = content_length % fcgi_padding_modulus
+  case remainder {
+    0 -> 0
+    _ -> fcgi_padding_modulus - remainder
+  }
+}
+
+fn build_request(params_bytes: BitArray) -> Result(Request(Nil), String) {
   use pairs <- result.try(
     protocol.parse_name_value_pairs(params_bytes)
     |> result.replace_error("malformed FastCGI parameters"),
   )
   let env = dict.from_list(pairs)
-  use _ <- result.try(check_content_length(env, body))
-  to_http_request(env, Connection(body))
+  use _ <- result.try(check_content_length(env))
+  to_http_request(env, Nil)
   |> result.map_error(request_error_message)
 }
 
@@ -420,10 +638,14 @@ pub fn to_http_request(
   let query =
     dict.get(env, "QUERY_STRING")
     |> option.from_result
+  let headers =
+    env
+    |> dict.to_list
+    |> list.filter_map(map_header)
 
   Ok(request.Request(
     method:,
-    headers: build_headers(env),
+    headers:,
     body:,
     scheme:,
     host:,
@@ -479,12 +701,6 @@ fn resolve_unbracketed_host(
   }
 }
 
-fn build_headers(env: Dict(String, String)) -> List(#(String, String)) {
-  env
-  |> dict.to_list
-  |> list.filter_map(map_header)
-}
-
 fn map_header(pair: #(String, String)) -> Result(#(String, String), Nil) {
   let #(key, value) = pair
   case key {
@@ -496,10 +712,7 @@ fn map_header(pair: #(String, String)) -> Result(#(String, String), Nil) {
   }
 }
 
-fn check_content_length(
-  env: dict.Dict(String, String),
-  body: BitArray,
-) -> Result(Nil, String) {
+fn check_content_length(env: Dict(String, String)) -> Result(Nil, String) {
   case dict.get(env, "CONTENT_LENGTH") {
     Error(_) -> Ok(Nil)
     Ok("") -> Ok(Nil)
@@ -507,20 +720,7 @@ fn check_content_length(
       case int.parse(raw) {
         Error(_) -> Error("invalid CONTENT_LENGTH: " <> raw)
         Ok(declared) if declared < 0 -> Error("invalid CONTENT_LENGTH: " <> raw)
-        Ok(declared) -> {
-          let actual = bit_array.byte_size(body)
-          case declared == actual {
-            True -> Ok(Nil)
-            False ->
-              Error(
-                "CONTENT_LENGTH "
-                <> int.to_string(declared)
-                <> " does not match received body of "
-                <> int.to_string(actual)
-                <> " bytes",
-              )
-          }
-        }
+        Ok(_) -> Ok(Nil)
       }
   }
 }

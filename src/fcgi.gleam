@@ -4,7 +4,6 @@
 
 import fcgi/internal/connection
 import fcgi/internal/server
-import gleam/bit_array
 import gleam/bool
 import gleam/bytes_tree.{type BytesTree}
 import gleam/http/request.{type Request}
@@ -13,14 +12,21 @@ import gleam/int
 import gleam/option.{type Option}
 import gleam/otp/actor
 import gleam/otp/supervision
+import gleam/result
 
-/// Server configuration produced by `new` and refined by `listen_path`
-/// and `max_body_size`. Pass it to `start` to begin listening.
-pub opaque type Builder(in, out) {
+const default_body_read_timeout_ms = 30_000
+
+const default_max_body_size = 268_435_456
+
+/// Server configuration produced by `new` and refined by `listen_path`,
+/// `max_body_size`, and `body_read_timeout`. Pass it to `start` to begin
+/// listening.
+pub opaque type Builder {
   Builder(
-    handler: fn(Request(in)) -> Response(out),
+    handler: fn(Request(Body)) -> Response(ResponseData),
     path: String,
     max_body_size: Int,
+    body_read_timeout_ms: Int,
   )
 }
 
@@ -36,6 +42,8 @@ pub type StartError {
   /// `max_body_size` was set to a negative value. Use `0` to reject all
   /// non-empty bodies, or any positive value for a real limit.
   InvalidMaxBodySize(bytes: Int)
+  /// `body_read_timeout` was set to a non-positive value.
+  InvalidBodyReadTimeout(milliseconds: Int)
 }
 
 /// A running server. Use `stop` to shut the server down.
@@ -45,34 +53,53 @@ pub opaque type Started {
 
 /// Set the Unix domain socket path the server listens on. The path must
 /// not already exist; `start` returns `SocketPathExists(path)` if it does.
-pub fn listen_path(
-  builder: Builder(in, out),
-  path: String,
-) -> Builder(in, out) {
+pub fn listen_path(builder: Builder, path: String) -> Builder {
   Builder(..builder, path:)
 }
 
-/// Set the maximum buffered request body in bytes. Must be `>= 0`;
-/// `start` returns `InvalidMaxBodySize(bytes)` for negative values.
-/// Default: 10 MiB.
-pub fn max_body_size(
-  builder: Builder(in, out),
-  bytes: Int,
-) -> Builder(in, out) {
+/// Set the maximum body bytes the server will deliver to the handler in
+/// total across all `read_chunk` calls. Must be `>= 0`; `start` returns
+/// `InvalidMaxBodySize(bytes)` for negative values.
+///
+/// When the peer sends more than this many bytes, the next `read_chunk`
+/// call returns `Error(BodyTooLarge)`. On a keep-alive connection the
+/// server then closes the socket rather than continuing to the next
+/// request, since the unread overflow has already corrupted the stream.
+///
+/// Default: 256 MiB.
+pub fn max_body_size(builder: Builder, bytes: Int) -> Builder {
   Builder(..builder, max_body_size: bytes)
 }
 
+/// Set how long `read_chunk` waits for the next stdin record before
+/// returning `Error(ReadTimeout)`. Must be `> 0`; `start` returns
+/// `InvalidBodyReadTimeout(milliseconds)` otherwise.
+///
+/// Applies between successive chunk reads, not to the request as a
+/// whole. Default: 30,000 ms.
+pub fn body_read_timeout(builder: Builder, milliseconds: Int) -> Builder {
+  Builder(..builder, body_read_timeout_ms: milliseconds)
+}
+
 /// Build a new FastCGI server with the given handler. The Unix socket
-/// path must be set with `listen_path` before calling `start`. Default:
-/// 10 MiB max body.
-pub fn new(handler: fn(Request(in)) -> Response(out)) -> Builder(in, out) {
-  Builder(handler:, path: "", max_body_size: 10 * 1024 * 1024)
+/// path must be set with `listen_path` before calling `start`.
+///
+/// The handler is invoked once `Params` is fully received. The request
+/// body is delivered incrementally via `Body`; call `read_chunk` (or
+/// `read_all` for the buffered case) to consume it.
+///
+/// Default: 256 MiB max body, 30 s body read timeout.
+pub fn new(handler: fn(Request(Body)) -> Response(ResponseData)) -> Builder {
+  Builder(
+    handler:,
+    path: "",
+    max_body_size: default_max_body_size,
+    body_read_timeout_ms: default_body_read_timeout_ms,
+  )
 }
 
 /// Start the server. Returns `Started`, or `StartError` on failure.
-pub fn start(
-  builder: Builder(Connection, ResponseData),
-) -> Result(Started, StartError) {
+pub fn start(builder: Builder) -> Result(Started, StartError) {
   use <- bool.guard(
     when: builder.path == "",
     return: Error(ListenerError("listen_path must be called with a socket path")),
@@ -81,10 +108,15 @@ pub fn start(
     when: builder.max_body_size < 0,
     return: Error(InvalidMaxBodySize(builder.max_body_size)),
   )
+  use <- bool.guard(
+    when: builder.body_read_timeout_ms <= 0,
+    return: Error(InvalidBodyReadTimeout(builder.body_read_timeout_ms)),
+  )
   let template =
     server.SpecTemplate(
       max_body_size: builder.max_body_size,
-      handler: adapt_handler(builder.handler),
+      body_read_timeout_ms: builder.body_read_timeout_ms,
+      handler: wrap_handler(builder.handler),
     )
   case server.start(builder.path, template) {
     Error(server.ListenerError(reason)) -> Error(ListenerError(reason))
@@ -110,9 +142,7 @@ pub fn stop(started: Started) -> Nil {
 /// When the parent supervisor terminates the child, the FastCGI
 /// supervisor and its workers shut down, the listening socket is
 /// released by the runtime, and the Unix socket path is unlinked.
-pub fn supervised(
-  builder: Builder(Connection, ResponseData),
-) -> supervision.ChildSpecification(Started) {
+pub fn supervised(builder: Builder) -> supervision.ChildSpecification(Started) {
   supervision.supervisor(fn() {
     case start(builder) {
       Error(ListenerError(reason)) -> Error(actor.InitFailed(reason))
@@ -122,27 +152,31 @@ pub fn supervised(
         Error(actor.InitFailed(
           "max_body_size must be non-negative; got " <> int.to_string(bytes),
         ))
+      Error(InvalidBodyReadTimeout(milliseconds)) ->
+        Error(actor.InitFailed(
+          "body_read_timeout must be positive; got "
+          <> int.to_string(milliseconds),
+        ))
       Ok(started) ->
         Ok(actor.Started(pid: started.server.supervisor_pid, data: started))
     }
   })
 }
 
-fn adapt_handler(
-  user_handler: fn(Request(Connection)) -> Response(ResponseData),
-) -> fn(Request(connection.Connection)) -> Response(connection.ResponseData) {
-  fn(req: Request(connection.Connection)) {
-    let connection.Connection(body) = req.body
-    let public_req = request.set_body(req, Connection(body))
-    let public_response = user_handler(public_req)
-    response.set_body(public_response, to_response_data(public_response.body))
+fn wrap_handler(
+  user_handler: fn(Request(Body)) -> Response(ResponseData),
+) -> fn(Request(Nil), connection.BodyReader) ->
+  Response(connection.ResponseData) {
+  fn(req: Request(Nil), reader: connection.BodyReader) {
+    let response = user_handler(request.set_body(req, Body(reader:)))
+    response.set_body(response, to_response_data(response.body))
   }
 }
 
 fn to_response_data(public: ResponseData) -> connection.ResponseData {
   case public {
     Bytes(content) -> connection.Bytes(content)
-    File(path, offset, limit) -> connection.File(path, offset, limit)
+    File(handle, offset, length) -> connection.File(handle:, offset:, length:)
     Stream(producer) ->
       connection.Stream(fn(internal_sender) {
         let public_sender =
@@ -152,33 +186,6 @@ fn to_response_data(public: ResponseData) -> connection.ResponseData {
         producer(public_sender)
       })
   }
-}
-
-/// A buffered FastCGI request body. Read it with `read_body`.
-pub opaque type Connection {
-  Connection(body: BitArray)
-}
-
-/// Read the buffered body of a request.
-/// Returns `Error(Nil)` if larger than `max_size`.
-pub fn read_body(
-  req: Request(Connection),
-  max_size max_size: Int,
-) -> Result(BitArray, Nil) {
-  let Connection(body) = req.body
-  case bit_array.byte_size(body) > max_size {
-    True -> Error(Nil)
-    False -> Ok(body)
-  }
-}
-
-/// Direct access to the buffered request body for adapters that need a
-/// chunked-reader shape (such as `fcgi/wisp_fcgi`). Public callers should
-/// use `read_body` instead.
-@internal
-pub fn body(req: Request(Connection)) -> BitArray {
-  let Connection(body) = req.body
-  body
 }
 
 /// Why `send_file` could not produce a `File` body.
@@ -195,25 +202,26 @@ pub type FileError {
   InvalidRange(offset: Int, limit: Option(Int))
 }
 
-/// Validate a file and produce a `File` `ResponseData`.
+/// Open a file and return a response body that streams it via
+/// `file:sendfile/5` when the response is sent.
 ///
-/// `offset` is the starting byte position in the file. It must be `>= 0`.
-/// An `offset` past end-of-file results in an empty body at request time.
+/// The file is opened eagerly so the response holds an open file
+/// descriptor — the path may be unlinked before the response is sent
+/// (for example by a deferred temp-file cleanup) and streaming will
+/// still succeed. The handle is closed by the connection actor after
+/// streaming completes.
 ///
-/// `limit` is `Some(n)` to send at most `n` bytes (must be `>= 0`), or
-/// `None` to stream from `offset` through end-of-file. `Some(0)` produces
-/// an empty body.
+/// `offset` is the starting byte position in the file (must be `>= 0`);
+/// an `offset` past end-of-file produces an empty body. `limit` is
+/// `Some(n)` to send at most `n` bytes (must be `>= 0`), or `None` to
+/// stream from `offset` through end-of-file.
 ///
-/// Returns `FileError` if the file is missing, inaccessible, a directory,
-/// or if `offset` or `limit` is negative.
+/// If `send_file` returns `Ok(body)`, the caller must use `body` as the
+/// response body — discarding it leaks the file descriptor until the
+/// connection actor exits.
 ///
-/// If the file is opened successfully but a later read fails mid-stream
-/// (for example, the file is truncated or unlinked while being sent),
-/// the response body is silently truncated at the failure point. The
-/// response headers and `END_REQUEST` record are still sent, so the
-/// upstream proxy will deliver whatever bytes were written before the
-/// failure. There is no way to surface a 500 at that point because the
-/// status line has already been written to the wire.
+/// Returns `FileError` if the file is missing, inaccessible, a
+/// directory, or if `offset` or `limit` is negative.
 pub fn send_file(
   path path: String,
   offset offset: Int,
@@ -223,10 +231,12 @@ pub fn send_file(
     when: offset < 0 || option.unwrap(limit, 0) < 0,
     return: Error(InvalidRange(offset:, limit:)),
   )
-  case connection.validate_file(path) {
-    Ok(_) -> Ok(File(path:, offset:, limit:))
-    Error(error) -> Error(map_file_error(error, path))
-  }
+  use #(handle, total_size) <- result.try(
+    connection.open_and_size(path) |> result.map_error(map_file_error(_, path)),
+  )
+  let max_length = option.unwrap(limit, total_size)
+  let length = int.clamp(total_size - offset, min: 0, max: max_length)
+  Ok(File(handle:, offset:, length:))
 }
 
 fn map_file_error(error: connection.FileError, path: String) -> FileError {
@@ -238,30 +248,31 @@ fn map_file_error(error: connection.FileError, path: String) -> FileError {
   }
 }
 
-/// What the server should send back as a response body.
-pub type ResponseData {
-  /// An in-memory body. The whole `BytesTree` is sent in
-  /// one or more `STDOUT` records.
+/// What the server should send back as a response body. Construct with
+/// `bytes`, `send_file`, or `stream`.
+pub type ResponseData =
+  InternalResponseData
+
+@internal
+pub type InternalResponseData {
   Bytes(content: BytesTree)
-  /// A file body streamed from disk. `offset` is the starting byte
-  /// position; `limit` is `Some(n)` to send at most `n` bytes, or
-  /// `None` to send to end-of-file.
-  ///
-  /// Use `send_file` to build this variant. `send_file` validates the
-  /// path, checks read access, and rejects negative `offset` or
-  /// `limit`. Direct construction skips all of that: an invalid path
-  /// surfaces later as a generic 500 response, and a negative `offset`
-  /// or `limit` produces an empty body without an error. Direct
-  /// construction is advanced usage and the caller owns the
-  /// invariants `send_file` would otherwise enforce.
-  File(path: String, offset: Int, limit: Option(Int))
-  /// A body produced incrementally by a callback. The
-  /// server calls `producer(sender)` after sending the response headers;
-  /// each call to `send_chunk(sender, data)` writes one or more `STDOUT`
-  /// records to the upstream proxy. Useful for long-lived responses such
-  /// as Server-Sent Events. See `send_chunk` for the calling convention
-  /// and caveats.
+  File(handle: connection.Handle, offset: Int, length: Int)
   Stream(producer: fn(StreamSender) -> Nil)
+}
+
+/// Build an in-memory response body. The whole `BytesTree` is sent in
+/// one or more `STDOUT` records.
+pub fn bytes(content: BytesTree) -> ResponseData {
+  Bytes(content:)
+}
+
+/// Build a streaming response body. The server calls `producer(sender)`
+/// after sending the response headers; each call to `send_chunk(sender,
+/// data)` writes one or more `STDOUT` records to the upstream proxy.
+/// Useful for long-lived responses such as Server-Sent Events. See
+/// `send_chunk` for the calling convention and caveats.
+pub fn stream(producer: fn(StreamSender) -> Nil) -> ResponseData {
+  Stream(producer:)
 }
 
 /// Handle passed to a `Stream` producer. Use `send_chunk` to emit body
@@ -285,4 +296,88 @@ pub opaque type StreamSender {
 pub fn send_chunk(sender: StreamSender, data: BitArray) -> Result(Nil, Nil) {
   let StreamSender(emit) = sender
   emit(data)
+}
+
+/// A handle to the streaming request body. Use `read_chunk` for the
+/// continuation-passing API or `read_all` to buffer the whole body.
+pub opaque type Body {
+  Body(reader: connection.BodyReader)
+}
+
+/// What `read_chunk` produced.
+pub type Read {
+  /// A chunk of body bytes plus a `consume` continuation that returns
+  /// the next chunk when called.
+  Chunk(data: BitArray, consume: fn() -> Result(Read, ReadError))
+  /// The body has been fully delivered.
+  EndOfBody
+}
+
+/// Why a `read_chunk` or `read_all` failed.
+pub type ReadError {
+  /// The connection from the upstream proxy was closed before the body
+  /// was fully delivered.
+  ClientDisconnected
+  /// No chunk arrived within the configured `body_read_timeout`. The
+  /// upstream proxy is slow, stalled, or has stopped sending stdin.
+  ReadTimeout
+  /// The body exceeded `max_body_size`.
+  BodyTooLarge
+}
+
+/// Read the next chunk from the request body. Returns `Chunk(data,
+/// consume)` where `consume` produces the next chunk, or `EndOfBody`
+/// once the body is fully delivered. Blocks for up to the configured
+/// `body_read_timeout` waiting for stdin records.
+///
+/// Each chunk reflects whatever the upstream proxy sent in the latest
+/// stdin record (typically up to ~64 KB). Slice the returned `data`
+/// further if you need smaller pieces.
+///
+/// `EndOfBody` signals that the upstream proxy closed stdin, not that
+/// the consumed byte count matches the `CONTENT_LENGTH` header. The
+/// header is forwarded on the request but not enforced against the
+/// stream. Handlers that need the guarantee should compare bytes
+/// consumed against `request.get_header(req, "content-length")`.
+pub fn read_chunk(body: Body) -> Result(Read, ReadError) {
+  wrap_reader(body.reader)()
+}
+
+fn wrap_reader(
+  reader: connection.BodyReader,
+) -> fn() -> Result(Read, ReadError) {
+  fn() {
+    case reader() {
+      Ok(connection.BodyMore(data, next)) ->
+        Ok(Chunk(data:, consume: wrap_reader(next)))
+      Ok(connection.BodyEnded) -> Ok(EndOfBody)
+      Error(connection.ConnectionLost) -> Error(ClientDisconnected)
+      Error(connection.Timeout) -> Error(ReadTimeout)
+      Error(connection.TooLarge) -> Error(BodyTooLarge)
+    }
+  }
+}
+
+/// Buffer the entire body into a `BytesTree`. The server's
+/// `max_body_size` setting is the upper bound; `read_chunk` returns
+/// `BodyTooLarge` if the peer exceeds it, surfaced here as the
+/// `Result` error.
+///
+/// The buffered length reflects what the upstream proxy actually sent,
+/// not what `CONTENT_LENGTH` advertised. See `read_chunk` for the
+/// enforcement caveat.
+pub fn read_all(body: Body) -> Result(BytesTree, ReadError) {
+  read_all_loop(wrap_reader(body.reader), bytes_tree.new())
+}
+
+fn read_all_loop(
+  reader: fn() -> Result(Read, ReadError),
+  acc: BytesTree,
+) -> Result(BytesTree, ReadError) {
+  case reader() {
+    Error(reason) -> Error(reason)
+    Ok(EndOfBody) -> Ok(acc)
+    Ok(Chunk(data, consume)) ->
+      read_all_loop(consume, bytes_tree.append(acc, data))
+  }
 }

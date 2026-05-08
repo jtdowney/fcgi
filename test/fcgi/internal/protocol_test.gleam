@@ -5,29 +5,6 @@ import gleam/list
 import qcheck
 import support/helpers
 
-pub fn outgoing_fixed_size_records_round_trip_test() {
-  use record <- qcheck.run(
-    qcheck.default_config() |> qcheck.with_test_count(100),
-    outgoing_fixed_size_record_generator(),
-  )
-  let bytes = bytes_tree.to_bit_array(protocol.encode_record(record))
-  let assert helpers.OutgoingParsed(parsed, rest) =
-    helpers.parse_outgoing(bytes)
-  assert parsed == record
-  assert rest == <<>>
-}
-
-pub fn incoming_fixed_size_records_round_trip_test() {
-  use record <- qcheck.run(
-    qcheck.default_config() |> qcheck.with_test_count(100),
-    incoming_fixed_size_record_generator(),
-  )
-  let bytes = protocol.encode_incoming(record)
-  let assert protocol.Parsed(parsed, rest) = protocol.parse_record(bytes)
-  assert parsed == record
-  assert rest == <<>>
-}
-
 fn outgoing_fixed_size_record_generator() -> qcheck.Generator(protocol.Outgoing) {
   qcheck.from_generators(end_request_generator(), [unknown_type_generator()])
 }
@@ -74,28 +51,6 @@ fn unknown_type_generator() -> qcheck.Generator(protocol.Outgoing) {
   qcheck.map(qcheck.bounded_int(50, 255), protocol.UnknownType)
 }
 
-pub fn name_value_pairs_round_trip_test() {
-  use pairs <- qcheck.run(
-    qcheck.default_config() |> qcheck.with_test_count(100),
-    name_value_pairs_generator(),
-  )
-  let bytes = protocol.encode_name_value_pairs(pairs)
-  let assert Ok(decoded) = protocol.parse_name_value_pairs(bytes)
-  assert decoded == pairs
-}
-
-pub fn name_value_pairs_round_trip_unicode_test() {
-  let pairs = [
-    #("greeting", "café"),
-    #("city", "東京"),
-    #("party", "🎉🎊"),
-    #("名前", "値"),
-  ]
-  let bytes = protocol.encode_name_value_pairs(pairs)
-  let assert Ok(decoded) = protocol.parse_name_value_pairs(bytes)
-  assert decoded == pairs
-}
-
 fn name_value_pairs_generator() -> qcheck.Generator(List(#(String, String))) {
   qcheck.list_from(name_value_pair_generator())
 }
@@ -119,29 +74,6 @@ fn short_or_long_string_generator() -> qcheck.Generator(String) {
       ),
     ],
   )
-}
-
-pub fn incoming_data_records_round_trip_test() {
-  use record <- qcheck.run(
-    qcheck.default_config() |> qcheck.with_test_count(100),
-    incoming_data_record_generator(),
-  )
-  let bytes = protocol.encode_incoming(record)
-  let assert protocol.Parsed(parsed, rest) = protocol.parse_record(bytes)
-  assert parsed == record
-  assert rest == <<>>
-}
-
-pub fn outgoing_data_records_round_trip_test() {
-  use record <- qcheck.run(
-    qcheck.default_config() |> qcheck.with_test_count(100),
-    outgoing_data_record_generator(),
-  )
-  let bytes = bytes_tree.to_bit_array(protocol.encode_record(record))
-  let assert helpers.OutgoingParsed(parsed, rest) =
-    helpers.parse_outgoing(bytes)
-  assert parsed == record
-  assert rest == <<>>
 }
 
 fn incoming_data_record_generator() -> qcheck.Generator(protocol.Incoming) {
@@ -195,6 +127,83 @@ fn short_name_generator() -> qcheck.Generator(String) {
   )
 }
 
+fn chunk_stdout_input_generator() -> qcheck.Generator(#(Int, BitArray)) {
+  use id <- qcheck.bind(request_id_generator())
+  use body <- qcheck.map(qcheck.generic_byte_aligned_bit_array(
+    qcheck.bounded_int(0, 255),
+    qcheck.bounded_int(0, 70_000),
+  ))
+  #(id, body)
+}
+
+pub fn outgoing_fixed_size_records_round_trip_test() {
+  use record <- qcheck.run(
+    qcheck.default_config() |> qcheck.with_test_count(100),
+    outgoing_fixed_size_record_generator(),
+  )
+  let bytes = bytes_tree.to_bit_array(protocol.encode_record(record))
+  let assert helpers.OutgoingParsed(parsed, rest) =
+    helpers.parse_outgoing(bytes)
+  assert parsed == record
+  assert rest == <<>>
+}
+
+pub fn incoming_fixed_size_records_round_trip_test() {
+  use record <- qcheck.run(
+    qcheck.default_config() |> qcheck.with_test_count(100),
+    incoming_fixed_size_record_generator(),
+  )
+  let bytes = protocol.encode_incoming(record)
+  let assert protocol.Parsed(parsed, rest) = protocol.parse_record(bytes)
+  assert parsed == record
+  assert rest == <<>>
+}
+
+pub fn name_value_pairs_round_trip_test() {
+  use pairs <- qcheck.run(
+    qcheck.default_config() |> qcheck.with_test_count(100),
+    name_value_pairs_generator(),
+  )
+  let bytes = protocol.encode_name_value_pairs(pairs)
+  let assert Ok(decoded) = protocol.parse_name_value_pairs(bytes)
+  assert decoded == pairs
+}
+
+pub fn name_value_pairs_round_trip_unicode_test() {
+  let pairs = [
+    #("greeting", "café"),
+    #("city", "東京"),
+    #("party", "🎉🎊"),
+    #("名前", "値"),
+  ]
+  let bytes = protocol.encode_name_value_pairs(pairs)
+  let assert Ok(decoded) = protocol.parse_name_value_pairs(bytes)
+  assert decoded == pairs
+}
+
+pub fn incoming_data_records_round_trip_test() {
+  use record <- qcheck.run(
+    qcheck.default_config() |> qcheck.with_test_count(100),
+    incoming_data_record_generator(),
+  )
+  let bytes = protocol.encode_incoming(record)
+  let assert protocol.Parsed(parsed, rest) = protocol.parse_record(bytes)
+  assert parsed == record
+  assert rest == <<>>
+}
+
+pub fn outgoing_data_records_round_trip_test() {
+  use record <- qcheck.run(
+    qcheck.default_config() |> qcheck.with_test_count(100),
+    outgoing_data_record_generator(),
+  )
+  let bytes = bytes_tree.to_bit_array(protocol.encode_record(record))
+  let assert helpers.OutgoingParsed(parsed, rest) =
+    helpers.parse_outgoing(bytes)
+  assert parsed == record
+  assert rest == <<>>
+}
+
 pub fn chunk_stdout_records_round_trip_test() {
   use #(id, body) <- qcheck.run(
     qcheck.default_config() |> qcheck.with_test_count(10),
@@ -212,15 +221,6 @@ pub fn chunk_stdout_records_round_trip_test() {
       <<acc:bits, data:bits>>
     })
   assert concatenated == body
-}
-
-fn chunk_stdout_input_generator() -> qcheck.Generator(#(Int, BitArray)) {
-  use id <- qcheck.bind(request_id_generator())
-  use body <- qcheck.map(qcheck.generic_byte_aligned_bit_array(
-    qcheck.bounded_int(0, 255),
-    qcheck.bounded_int(0, 70_000),
-  ))
-  #(id, body)
 }
 
 pub fn chunk_stdout_size_zero_yields_no_records_test() {

@@ -1,10 +1,11 @@
 import fcgi/internal/connection
+import fcgi/internal/protocol
 import gleam/bit_array
 import gleam/bytes_tree
 import gleam/erlang/process
 import gleam/http/request.{type Request}
 import gleam/http/response
-import gleam/option
+import gleam/int
 import gleam/string
 import simplifile
 import support/helpers
@@ -16,7 +17,7 @@ pub fn connection_actor_serves_one_request_test() {
 
   process.spawn(fn() {
     let assert Ok(server) = connection.accept(listen_sock)
-    let handler = fn(_req: Request(connection.Connection)) {
+    let handler = fn(_req: Request(Nil), _body: connection.BodyReader) {
       response.new(200)
       |> response.set_header("content-type", "text/plain")
       |> response.set_body(connection.Bytes(bytes_tree.from_string("ok")))
@@ -25,11 +26,11 @@ pub fn connection_actor_serves_one_request_test() {
       connection.Spec(
         socket: server,
         max_body_size: 10 * 1024 * 1024,
-        handler: handler,
+        body_read_timeout_ms: 30_000,
+        handler:,
       )
     let assert Ok(started) = connection.start(spec)
     let assert Ok(_) = connection.controlling_process(server, started.pid)
-    let assert Ok(_) = connection.setopts_active_once(server)
     Nil
   })
 
@@ -66,7 +67,7 @@ pub fn connection_actor_stops_on_socket_closed_test() {
 
   process.spawn(fn() {
     let assert Ok(server) = connection.accept(listen_sock)
-    let handler = fn(_req: Request(connection.Connection)) {
+    let handler = fn(_req: Request(Nil), _body: connection.BodyReader) {
       response.new(200)
       |> response.set_body(connection.Bytes(bytes_tree.from_string("never")))
     }
@@ -74,11 +75,11 @@ pub fn connection_actor_stops_on_socket_closed_test() {
       connection.Spec(
         socket: server,
         max_body_size: 10 * 1024 * 1024,
-        handler: handler,
+        body_read_timeout_ms: 30_000,
+        handler:,
       )
     let assert Ok(started) = connection.start(spec)
     let assert Ok(_) = connection.controlling_process(server, started.pid)
-    let assert Ok(_) = connection.setopts_active_once(server)
     process.send(parent, started.pid)
   })
 
@@ -101,24 +102,22 @@ pub fn connection_actor_streams_file_test() {
 
   process.spawn(fn() {
     let assert Ok(server) = connection.accept(listen_sock)
-    let handler = fn(_req: Request(connection.Connection)) {
+    let handler = fn(_req: Request(Nil), _body: connection.BodyReader) {
+      let assert Ok(#(handle, size)) =
+        connection.open_and_size("test/fixtures/hello.txt")
       response.new(200)
       |> response.set_header("content-type", "text/plain")
-      |> response.set_body(connection.File(
-        "test/fixtures/hello.txt",
-        0,
-        option.None,
-      ))
+      |> response.set_body(connection.File(handle:, offset: 0, length: size))
     }
     let spec =
       connection.Spec(
         socket: server,
         max_body_size: 10 * 1024 * 1024,
-        handler: handler,
+        body_read_timeout_ms: 30_000,
+        handler:,
       )
     let assert Ok(started) = connection.start(spec)
     let assert Ok(_) = connection.controlling_process(server, started.pid)
-    let assert Ok(_) = connection.setopts_active_once(server)
     Nil
   })
 
@@ -148,6 +147,66 @@ pub fn connection_actor_streams_file_test() {
   assert body == expected
 }
 
+pub fn read_chunk_returns_timeout_when_stdin_stalls_test() {
+  use path <- helpers.with_temp_socket_path
+  let assert Ok(listen_sock) = connection.listen(path)
+
+  process.spawn(fn() {
+    let assert Ok(server) = connection.accept(listen_sock)
+    let handler = fn(_req: Request(Nil), reader: connection.BodyReader) {
+      let body = case reader() {
+        Error(connection.Timeout) -> "timeout"
+        _ -> "unexpected"
+      }
+      response.new(408)
+      |> response.set_header("content-type", "text/plain")
+      |> response.set_body(connection.Bytes(bytes_tree.from_string(body)))
+    }
+    let spec =
+      connection.Spec(
+        socket: server,
+        max_body_size: 10 * 1024 * 1024,
+        body_read_timeout_ms: 100,
+        handler:,
+      )
+    let assert Ok(started) = connection.start(spec)
+    let assert Ok(_) = connection.controlling_process(server, started.pid)
+    Nil
+  })
+
+  let assert Ok(client) = test_client.connect(path)
+  let begin =
+    protocol.encode_incoming(protocol.BeginRequest(
+      request_id: 1,
+      role: protocol.responder_role,
+      keep_conn: False,
+    ))
+  let params =
+    protocol.encode_incoming(protocol.Params(
+      request_id: 1,
+      data: protocol.encode_name_value_pairs([
+        #("REQUEST_METHOD", "POST"),
+        #("SERVER_NAME", "localhost"),
+        #("PATH_INFO", "/"),
+      ]),
+    ))
+  let params_end =
+    protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+  let request_bytes = <<begin:bits, params:bits, params_end:bits>>
+  let assert Ok(_) = connection.send(client, request_bytes)
+
+  let received = helpers.recv_until_closed(client)
+  connection.close_socket(client)
+  connection.close_socket(listen_sock)
+
+  let assert Ok(records) = helpers.decode_all_records(received)
+  let stdout = helpers.collect_stdout(records)
+  let assert Ok(text) = bit_array.to_string(stdout)
+  let assert Ok(#(headers, body)) = string.split_once(text, "\r\n\r\n")
+  assert string.contains(headers, "Status: " <> int.to_string(408))
+  assert body == "timeout"
+}
+
 pub fn connection_actor_runs_stream_producer_test() {
   use path <- helpers.with_temp_socket_path
   let assert Ok(listen_sock) = connection.listen(path)
@@ -159,7 +218,7 @@ pub fn connection_actor_runs_stream_producer_test() {
       let _ = connection.send_chunk(sender, <<"chunk2":utf8>>)
       Nil
     }
-    let handler = fn(_req: Request(connection.Connection)) {
+    let handler = fn(_req: Request(Nil), _body: connection.BodyReader) {
       response.new(200)
       |> response.set_header("content-type", "text/plain")
       |> response.set_body(connection.Stream(producer))
@@ -168,11 +227,11 @@ pub fn connection_actor_runs_stream_producer_test() {
       connection.Spec(
         socket: server,
         max_body_size: 10 * 1024 * 1024,
-        handler: handler,
+        body_read_timeout_ms: 30_000,
+        handler:,
       )
     let assert Ok(started) = connection.start(spec)
     let assert Ok(_) = connection.controlling_process(server, started.pid)
-    let assert Ok(_) = connection.setopts_active_once(server)
     Nil
   })
 

@@ -11,13 +11,17 @@ import support/test_client
 
 pub fn server_serves_request_over_unix_test() {
   use path <- helpers.with_temp_socket_path
-  let handler = fn(_req: Request(connection.Connection)) {
+  let handler = fn(_req: Request(Nil), _body: connection.BodyReader) {
     response.new(200)
     |> response.set_header("content-type", "text/plain")
     |> response.set_body(connection.Bytes(bytes_tree.from_string("ok")))
   }
   let template =
-    server.SpecTemplate(max_body_size: 10 * 1024 * 1024, handler: handler)
+    server.SpecTemplate(
+      max_body_size: 10 * 1024 * 1024,
+      body_read_timeout_ms: 30_000,
+      handler:,
+    )
 
   let assert Ok(running) = server.start(path, template)
 
@@ -48,13 +52,17 @@ pub fn server_serves_request_over_unix_test() {
 
 pub fn server_stop_closes_listen_socket_test() {
   use path <- helpers.with_temp_socket_path
-  let handler = fn(_req: Request(connection.Connection)) {
+  let handler = fn(_req: Request(Nil), _body: connection.BodyReader) {
     response.new(200)
     |> response.set_header("content-type", "text/plain")
     |> response.set_body(connection.Bytes(bytes_tree.from_string("ok")))
   }
   let template =
-    server.SpecTemplate(max_body_size: 10 * 1024 * 1024, handler: handler)
+    server.SpecTemplate(
+      max_body_size: 10 * 1024 * 1024,
+      body_read_timeout_ms: 30_000,
+      handler:,
+    )
 
   let assert Ok(running) = server.start(path, template)
 
@@ -63,5 +71,5 @@ pub fn server_stop_closes_listen_socket_test() {
 
   let result = test_client.connect(path)
   let assert Error(_) = result
-  assert process.is_alive(supervisor_pid) == False
+  assert !process.is_alive(supervisor_pid)
 }

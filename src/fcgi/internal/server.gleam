@@ -12,7 +12,8 @@ import gleam/result
 pub type SpecTemplate {
   SpecTemplate(
     max_body_size: Int,
-    handler: fn(Request(connection.Connection)) ->
+    body_read_timeout_ms: Int,
+    handler: fn(Request(Nil), connection.BodyReader) ->
       Response(connection.ResponseData),
   )
 }
@@ -63,10 +64,6 @@ pub fn stop(server: Server) -> Nil {
   shutdown_supervisor(server.supervisor_pid)
 }
 
-type JanitorMessage {
-  JanitorShutdown
-}
-
 type JanitorState {
   JanitorState(path: String)
 }
@@ -83,19 +80,15 @@ fn start_path_janitor(path: String) -> actor.StartResult(Nil) {
     process.trap_exits(True)
     let selector =
       process.new_selector()
-      |> process.select_trapped_exits(fn(_msg) { JanitorShutdown })
+      |> process.select_trapped_exits(fn(_msg) { Nil })
     actor.initialised(JanitorState(path:))
     |> actor.selecting(selector)
     |> actor.returning(Nil)
     |> Ok
   })
-  |> actor.on_message(fn(state, message) {
-    case message {
-      JanitorShutdown -> {
-        connection.delete_path(state.path)
-        actor.stop()
-      }
-    }
+  |> actor.on_message(fn(state, _message) {
+    connection.delete_path(state.path)
+    actor.stop()
   })
   |> actor.start
 }
@@ -125,12 +118,18 @@ fn accept_loop(
   template: SpecTemplate,
 ) -> Nil {
   case connection.accept(listen_socket) {
-    Error(_) -> Nil
+    Error(connection.Posix(reason)) ->
+      case atom.to_string(reason) {
+        "closed" -> Nil
+        other -> panic as { "fcgi acceptor: accept failed: " <> other }
+      }
+    Error(connection.PathExists(_)) -> Nil
     Ok(client) -> {
       let spec =
         connection.Spec(
           socket: client,
           max_body_size: template.max_body_size,
+          body_read_timeout_ms: template.body_read_timeout_ms,
           handler: template.handler,
         )
       case factory_supervisor.start_child(factory, spec) {
@@ -143,11 +142,7 @@ fn accept_loop(
 }
 
 fn handoff_client(client: connection.Socket, child_pid: process.Pid) -> Nil {
-  let result = {
-    use _ <- result.try(connection.controlling_process(client, child_pid))
-    connection.setopts_active_once(client)
-  }
-  case result {
+  case connection.controlling_process(client, child_pid) {
     Ok(Nil) -> Nil
     Error(_) -> {
       connection.close_socket(client)

@@ -1,11 +1,13 @@
 import birdie
 import fcgi
 import fcgi/internal/connection
+import fcgi/internal/protocol
 import fcgi/wisp_fcgi
 import gleam/bit_array
 import gleam/bytes_tree
 import gleam/http
 import gleam/int
+import gleam/list
 import gleam/option
 import gleam/string
 import simplifile
@@ -91,7 +93,8 @@ pub fn map_response_maps_each_body_variant_test() {
       limit: option.None,
     ))
     |> wisp_fcgi.map_response
-  let assert fcgi.Stream(_producer) = file.body
+  let assert fcgi.File(handle, 0, 12) = file.body
+  connection.close_file(handle)
 }
 
 pub fn end_to_end_wisp_missing_file_returns_500_test() {
@@ -199,7 +202,7 @@ pub fn wisp_file_response_propagates_offset_and_limit_test() {
   assert body == "world"
 }
 
-pub fn wisp_file_response_serves_body_after_path_unlinked_test() {
+pub fn wisp_file_response_streams_after_temp_file_unlinked_test() {
   use path <- helpers.with_temp_socket_path
   let secret_key_base =
     "test-secret-key-base-padding-to-meet-min-length-requirements"
@@ -217,6 +220,15 @@ pub fn wisp_file_response_serves_body_after_path_unlinked_test() {
   fcgi.stop(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
+  let has_end_request =
+    list.any(records, fn(record) {
+      case record {
+        protocol.EndRequest(_, _, _) -> True
+        _ -> False
+      }
+    })
+  assert has_end_request
+
   let stdout = helpers.collect_stdout(records)
   let assert Ok(text) = bit_array.to_string(stdout)
   let assert Ok(#(_headers, body)) = string.split_once(text, "\r\n\r\n")

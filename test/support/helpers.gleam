@@ -19,6 +19,11 @@ pub fn with_temp_socket_path(fun: fn(String) -> a) -> a {
   value
 }
 
+pub fn with_temp_file(fun: fn(String) -> a) -> a {
+  let assert Ok(value) = temporary.create(temporary.file(), fun)
+  value
+}
+
 pub fn request_stream_bytes(
   request_id request_id: Int,
   params params: List(#(String, String)),
@@ -46,13 +51,6 @@ pub fn request_stream_bytes(
     stdin:bits,
     stdin_end:bits,
   >>
-}
-
-pub fn is_end_request(record: protocol.Outgoing) -> Bool {
-  case record {
-    protocol.EndRequest(_, _, _) -> True
-    _ -> False
-  }
 }
 
 pub fn parse_outgoing(buffer: BitArray) -> OutgoingParseResult {
