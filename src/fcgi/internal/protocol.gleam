@@ -5,11 +5,11 @@ import gleam/list
 import gleam/pair
 import gleam/result
 
-pub const max_record_content_size: Int = 65_535
+pub const max_record_content_size = 65_535
 
-pub const responder_role: Int = 1
+pub const responder_role = 1
 
-const supported_version: Int = 1
+const supported_version = 1
 
 pub type Outgoing {
   EndRequest(request_id: Int, app_status: Int, protocol_status: Status)
@@ -141,7 +141,7 @@ fn frame_tree(record_type: Int, request_id: Int, body: BytesTree) -> BytesTree {
   |> bytes_tree.append(padding)
 }
 
-fn padding_for(content_length: Int) -> Int {
+pub fn padding_for(content_length: Int) -> Int {
   let remainder = content_length % 8
   case remainder {
     0 -> 0

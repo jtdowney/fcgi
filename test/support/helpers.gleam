@@ -6,7 +6,7 @@ import gleam/bytes_tree
 import gleam/list
 import temporary
 
-const supported_version: Int = 1
+const supported_version = 1
 
 pub type OutgoingParseResult {
   OutgoingParsed(record: protocol.Outgoing, rest: BitArray)

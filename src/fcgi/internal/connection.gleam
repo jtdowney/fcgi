@@ -17,17 +17,15 @@ import gleam/otp/actor
 import gleam/result
 import gleam/string
 
-const file_chunk_size: Int = 65_535
+const file_chunk_size = 65_535
 
-const max_params_size: Int = 262_144
+const max_params_size = 262_144
 
-const init_recv_timeout_ms: Int = 60_000
+const init_recv_timeout_ms = 60_000
 
-const fcgi_version: Int = 1
+const fcgi_version = 1
 
-const fcgi_stdout_type: Int = 6
-
-const fcgi_padding_modulus: Int = 8
+const fcgi_stdout_type = 6
 
 pub type Socket
 
@@ -525,7 +523,7 @@ fn send_via_sendfile(
   use <- bool.guard(when: remaining <= 0, return: Ok(Nil))
 
   let chunk_size = int.min(remaining, file_chunk_size)
-  let padding_length = padding_for(chunk_size)
+  let padding_length = protocol.padding_for(chunk_size)
   let header = encode_stdout_header(request_id, chunk_size, padding_length)
   use _ <- result.try(
     send(socket, header)
@@ -581,14 +579,6 @@ fn send_padding(
 ) -> Result(Nil, SocketError) {
   use <- bool.guard(when: padding_length == 0, return: Ok(Nil))
   send(socket, <<0:size({ padding_length * 8 })>>)
-}
-
-fn padding_for(content_length: Int) -> Int {
-  let remainder = content_length % fcgi_padding_modulus
-  case remainder {
-    0 -> 0
-    _ -> fcgi_padding_modulus - remainder
-  }
 }
 
 fn build_request(params_bytes: BitArray) -> Result(Request(Nil), String) {

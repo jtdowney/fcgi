@@ -2,7 +2,7 @@ import fcgi/internal/connection
 import gleam/bytes_tree.{type BytesTree}
 import gleam/result
 
-const idle_timeout_ms: Int = 50
+const idle_timeout_ms = 50
 
 @external(erlang, "fcgi_test_ffi", "connect")
 pub fn connect(

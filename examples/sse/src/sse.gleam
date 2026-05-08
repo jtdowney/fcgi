@@ -14,9 +14,9 @@ import gleam/int
 import gleam/io
 import gleam/option
 
-const event_count: Int = 10
+const event_count = 10
 
-const event_interval_ms: Int = 1000
+const event_interval_ms = 1000
 
 const socket_path = "/tmp/fcgi_sse.sock"
 

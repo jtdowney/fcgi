@@ -8,9 +8,9 @@ import gleam/http/response
 import gleam/list
 import support/helpers
 
-const max_body: Int = 1_048_576
+const max_body = 1_048_576
 
-const max_params: Int = 65_536
+const max_params = 65_536
 
 fn response_payload_string(
   resp: response.Response(fcgi.ResponseData),
