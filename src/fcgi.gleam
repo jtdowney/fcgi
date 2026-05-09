@@ -67,6 +67,11 @@ pub fn listen_path(builder: Builder, path: String) -> Builder {
 /// request, since the unread overflow has already corrupted the stream.
 ///
 /// Default: 256 MiB.
+///
+/// Separately, FastCGI params (env vars plus cookies) are capped at a
+/// fixed 64 KiB per request and not configurable here. Requests that
+/// exceed the cap are rejected with an `Overloaded` end record before
+/// the handler runs.
 pub fn max_body_size(builder: Builder, bytes: Int) -> Builder {
   Builder(..builder, max_body_size: bytes)
 }
@@ -340,21 +345,17 @@ pub type ReadError {
 /// stream. Handlers that need the guarantee should compare bytes
 /// consumed against `request.get_header(req, "content-length")`.
 pub fn read_chunk(body: Body) -> Result(Read, ReadError) {
-  wrap_reader(body.reader)()
+  read_step(body.reader)
 }
 
-fn wrap_reader(
-  reader: connection.BodyReader,
-) -> fn() -> Result(Read, ReadError) {
-  fn() {
-    case reader() {
-      Ok(connection.BodyMore(data, next)) ->
-        Ok(Chunk(data:, consume: wrap_reader(next)))
-      Ok(connection.BodyEnded) -> Ok(EndOfBody)
-      Error(connection.ConnectionLost) -> Error(ClientDisconnected)
-      Error(connection.Timeout) -> Error(ReadTimeout)
-      Error(connection.TooLarge) -> Error(BodyTooLarge)
-    }
+fn read_step(reader: connection.BodyReader) -> Result(Read, ReadError) {
+  case reader() {
+    Ok(connection.BodyMore(data, next)) ->
+      Ok(Chunk(data:, consume: fn() { read_step(next) }))
+    Ok(connection.BodyEnded) -> Ok(EndOfBody)
+    Error(connection.ConnectionLost) -> Error(ClientDisconnected)
+    Error(connection.Timeout) -> Error(ReadTimeout)
+    Error(connection.TooLarge) -> Error(BodyTooLarge)
   }
 }
 
@@ -367,17 +368,17 @@ fn wrap_reader(
 /// not what `CONTENT_LENGTH` advertised. See `read_chunk` for the
 /// enforcement caveat.
 pub fn read_all(body: Body) -> Result(BytesTree, ReadError) {
-  read_all_loop(wrap_reader(body.reader), bytes_tree.new())
+  read_all_loop(read_step(body.reader), bytes_tree.new())
 }
 
 fn read_all_loop(
-  reader: fn() -> Result(Read, ReadError),
+  read: Result(Read, ReadError),
   acc: BytesTree,
 ) -> Result(BytesTree, ReadError) {
-  case reader() {
+  case read {
     Error(reason) -> Error(reason)
     Ok(EndOfBody) -> Ok(acc)
     Ok(Chunk(data, consume)) ->
-      read_all_loop(consume, bytes_tree.append(acc, data))
+      read_all_loop(consume(), bytes_tree.append(acc, data))
   }
 }

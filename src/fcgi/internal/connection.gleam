@@ -19,7 +19,7 @@ import gleam/string
 
 const file_chunk_size = 65_535
 
-const max_params_size = 262_144
+const max_params_size = 65_536
 
 const init_recv_timeout_ms = 60_000
 
@@ -459,19 +459,25 @@ fn send_response(
   request_id: Int,
   response: Response(ResponseData),
 ) -> Nil {
-  let _ =
+  let _ = try_send_response(socket, request_id, response)
+  Nil
+}
+
+fn try_send_response(
+  socket: Socket,
+  request_id: Int,
+  response: Response(ResponseData),
+) -> Result(Nil, Nil) {
+  use _ <- result.try(
     send_if_nonempty(
       socket,
       handler.encode_response_header(request_id, response),
     )
-  case send_response_body(socket, request_id, response.body) {
-    Error(_) -> Nil
-    Ok(_) -> {
-      let _ =
-        send_if_nonempty(socket, handler.encode_response_terminator(request_id))
-      Nil
-    }
-  }
+    |> result.replace_error(Nil),
+  )
+  use _ <- result.try(send_response_body(socket, request_id, response.body))
+  send_if_nonempty(socket, handler.encode_response_terminator(request_id))
+  |> result.replace_error(Nil)
 }
 
 fn error_response(status: Int, message: String) -> Response(ResponseData) {

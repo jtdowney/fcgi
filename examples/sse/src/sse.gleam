@@ -6,6 +6,7 @@
 
 import fcgi
 import gleam/bit_array
+import gleam/bool
 import gleam/bytes_tree
 import gleam/erlang/process
 import gleam/http/request.{type Request}
@@ -58,32 +59,26 @@ fn serve_static_file(
 }
 
 fn events_stream() -> Response(fcgi.ResponseData) {
-  let producer = fn(sender) { emit_events(sender, 1) }
-
   response.new(200)
   |> response.set_header("content-type", "text/event-stream")
   |> response.set_header("cache-control", "no-cache")
   |> response.set_header("x-accel-buffering", "no")
-  |> response.set_body(fcgi.stream(producer))
+  |> response.set_body(fcgi.stream(emit_events(_, 1)))
 }
 
 fn emit_events(sender: fcgi.StreamSender, n: Int) -> Nil {
-  case n > event_count {
-    True -> Nil
-    False -> {
-      let payload =
-        "event: tick\ndata: event "
-        <> int.to_string(n)
-        <> " of "
-        <> int.to_string(event_count)
-        <> "\n\n"
-      case fcgi.send_chunk(sender, bit_array.from_string(payload)) {
-        Error(_) -> Nil
-        Ok(_) -> {
-          process.sleep(event_interval_ms)
-          emit_events(sender, n + 1)
-        }
-      }
+  use <- bool.guard(when: n > event_count, return: Nil)
+  let payload =
+    "event: tick\ndata: event "
+    <> int.to_string(n)
+    <> " of "
+    <> int.to_string(event_count)
+    <> "\n\n"
+  case fcgi.send_chunk(sender, bit_array.from_string(payload)) {
+    Error(_) -> Nil
+    Ok(_) -> {
+      process.sleep(event_interval_ms)
+      emit_events(sender, n + 1)
     }
   }
 }

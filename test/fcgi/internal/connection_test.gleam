@@ -1,3 +1,4 @@
+import birdie
 import fcgi/internal/connection
 import fcgi/internal/protocol
 import gleam/bit_array
@@ -5,7 +6,6 @@ import gleam/bytes_tree
 import gleam/erlang/process
 import gleam/http/request.{type Request}
 import gleam/http/response
-import gleam/int
 import gleam/string
 import simplifile
 import support/helpers
@@ -203,9 +203,7 @@ pub fn read_chunk_returns_timeout_when_stdin_stalls_test() {
   let assert Ok(records) = helpers.decode_all_records(received)
   let stdout = helpers.collect_stdout(records)
   let assert Ok(text) = bit_array.to_string(stdout)
-  let assert Ok(#(headers, body)) = string.split_once(text, "\r\n\r\n")
-  assert string.contains(headers, "Status: " <> int.to_string(408))
-  assert body == "timeout"
+  birdie.snap(text, "read_chunk_returns_timeout_when_stdin_stalls_payload")
 }
 
 pub fn connection_actor_runs_stream_producer_test() {

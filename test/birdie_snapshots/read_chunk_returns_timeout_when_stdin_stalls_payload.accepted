@@ -1,0 +1,10 @@
+---
+version: 2.0.0
+title: read_chunk_returns_timeout_when_stdin_stalls_payload
+file: ./test/fcgi/internal/connection_test.gleam
+test_name: read_chunk_returns_timeout_when_stdin_stalls_test
+---
+Status: 408
+content-type: text/plain
+
+timeout
