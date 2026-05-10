@@ -15,7 +15,7 @@
     close_file/1
 ]).
 
--define(LISTEN_OPTS, [binary, {active, false}, {packet, raw}]).
+-define(LISTEN_OPTS, [binary, {active, false}, {packet, raw}, {backlog, 1024}]).
 
 open_and_size(Path) ->
     case file:read_file_info(Path) of
