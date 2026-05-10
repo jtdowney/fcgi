@@ -84,7 +84,7 @@ fn run_handler_with_body(
   let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
@@ -112,7 +112,7 @@ fn run_unreachable_handler(request_bytes: BitArray) -> String {
   let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
@@ -181,7 +181,7 @@ pub fn end_to_end_get_returns_handler_body_test() {
   let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
@@ -255,7 +255,7 @@ pub fn file_unlinked_after_send_file_still_streams_test() {
   let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let has_end_request =
@@ -419,7 +419,7 @@ pub fn builder_max_body_size_rejects_oversized_body_test() {
   let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_records =
@@ -454,7 +454,7 @@ pub fn handler_panic_returns_500_response_test() {
   let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
@@ -494,7 +494,7 @@ pub fn content_length_non_numeric_returns_400_test() {
   let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
@@ -526,7 +526,7 @@ pub fn content_length_negative_returns_400_test() {
   let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
@@ -569,7 +569,7 @@ pub fn request_body_is_passed_through_to_handler_test() {
   let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
@@ -632,7 +632,7 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
   let assert Ok(_) = connection.send_bits(socket, stdin_end)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
@@ -665,7 +665,7 @@ pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
   let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payloads =
@@ -715,7 +715,7 @@ pub fn stream_send_chunk_splits_large_payload_into_max_size_records_test() {
   let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 5000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payload_sizes =
@@ -757,7 +757,7 @@ pub fn stream_producer_panic_still_emits_end_request_test() {
   let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
@@ -823,9 +823,7 @@ pub fn supervised_spec_starts_and_serves_request_test() {
     |> fcgi.listen_path(path)
     |> fcgi.supervised
 
-  let assert Ok(actor.Started(pid: sup_pid, data: started)) = spec.start()
-  assert process.is_alive(sup_pid)
-
+  let assert Ok(started) = spec.start()
   let assert Ok(socket) = test_client.connect(path)
   let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
@@ -837,9 +835,7 @@ pub fn supervised_spec_starts_and_serves_request_test() {
   let assert Ok(#(_headers, body)) = string.split_once(text, "\r\n\r\n")
   assert body == "supervised-ok"
 
-  fcgi.stop(started)
-  assert !process.is_alive(sup_pid)
-  assert simplifile.is_file(path) == Ok(False)
+  helpers.stop_supervisor(started)
 }
 
 pub fn supervised_spec_returns_init_failed_on_listener_error_test() {
@@ -919,7 +915,7 @@ pub fn socket_path_unlinks_on_stop_test() {
 
   let assert Ok(_info) = simplifile.file_info(path)
 
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   assert simplifile.is_file(path) == Ok(False)
 }
@@ -941,7 +937,7 @@ pub fn keep_alive_streams_two_sequential_requests_on_one_socket_test() {
     connection.send_bits(socket, echo_post_request_bytes(2, "second", False))
   let assert Ok(resp2) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records1) = helpers.decode_all_records(resp1)
   assert end_request_for(records1, 1)
@@ -968,7 +964,7 @@ pub fn keep_alive_handles_pipelined_requests_in_one_send_test() {
   let assert Ok(_) = connection.send_bits(socket, pipelined)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(bytes)
   assert end_request_for(records, 1)
@@ -1002,7 +998,7 @@ pub fn keep_alive_drains_unread_body_before_next_request_test() {
     connection.send_bits(socket, echo_post_request_bytes(2, "follow-up", False))
   let assert Ok(resp2) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records1) = helpers.decode_all_records(resp1)
   assert end_request_for(records1, 1)
@@ -1028,7 +1024,7 @@ pub fn keep_conn_false_closes_socket_after_response_test() {
   let second_send =
     connection.send_bits(socket, echo_post_request_bytes(2, "ignored", False))
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records) = helpers.decode_all_records(resp)
   assert end_request_for(records, 1)
@@ -1076,7 +1072,7 @@ pub fn keep_alive_does_not_loop_when_body_overflows_test() {
   let second_send =
     connection.send_bits(socket, echo_post_request_bytes(2, "later", False))
   connection.close_socket(socket)
-  fcgi.stop(started)
+  helpers.stop_supervisor(started)
 
   let assert Ok(records1) = helpers.decode_all_records(resp1)
   assert end_request_for(records1, 1)

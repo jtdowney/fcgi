@@ -3,7 +3,9 @@ import fcgi/internal/protocol
 import gleam/bit_array
 import gleam/bool
 import gleam/bytes_tree
+import gleam/erlang/process
 import gleam/list
+import gleam/otp/actor
 import temporary
 
 const supported_version = 1
@@ -12,6 +14,13 @@ pub type OutgoingParseResult {
   OutgoingParsed(record: protocol.Outgoing, rest: BitArray)
   OutgoingNeedMore
   OutgoingParseError(reason: protocol.ParseFailure)
+}
+
+@external(erlang, "gen_server", "stop")
+fn gen_server_stop(pid: process.Pid) -> Nil
+
+pub fn stop_supervisor(started: actor.Started(a)) -> Nil {
+  gen_server_stop(started.pid)
 }
 
 pub fn with_temp_socket_path(fun: fn(String) -> a) -> a {
