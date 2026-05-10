@@ -8,25 +8,18 @@ import gleam/list
 import gleam/option
 import gleam/string
 
-pub fn encode_stdout_chunk(request_id: Int, payload: BitArray) -> BytesTree {
-  case bit_array.byte_size(payload) {
-    0 -> bytes_tree.new()
-    _ -> encode_records(protocol.chunk_stdout(request_id, payload))
-  }
-}
-
-pub fn encode_response_body_tree(
-  request_id: Int,
-  data: BytesTree,
-) -> BytesTree {
-  let size = bytes_tree.byte_size(data)
+pub fn encode_stdout_chunk(request_id: Int, payload: BytesTree) -> BytesTree {
+  let size = bytes_tree.byte_size(payload)
   use <- bool.guard(when: size == 0, return: bytes_tree.new())
   use <- bool.guard(
-    when: size > protocol.max_record_content_size,
-    return: encode_stdout_chunk(request_id, bytes_tree.to_bit_array(data)),
+    when: size <= protocol.max_record_content_size,
+    return: protocol.encode_stdout(request_id, payload),
   )
 
-  protocol.encode_stdout(request_id, data)
+  encode_records(protocol.chunk_stdout(
+    request_id,
+    bytes_tree.to_bit_array(payload),
+  ))
 }
 
 pub fn encode_response_header(
@@ -34,7 +27,7 @@ pub fn encode_response_header(
   resp: Response(body),
 ) -> BytesTree {
   let header_block = render_header_block(resp)
-  encode_stdout_chunk(request_id, <<header_block:utf8>>)
+  encode_stdout_chunk(request_id, bytes_tree.from_string(header_block))
 }
 
 pub fn encode_response_terminator(request_id: Int) -> BytesTree {

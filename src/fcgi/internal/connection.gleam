@@ -71,6 +71,9 @@ pub fn recv(
 @external(erlang, "fcgi_ffi", "send")
 pub fn send(socket: Socket, data: BitArray) -> Result(Nil, SocketError)
 
+@external(erlang, "fcgi_ffi", "send")
+fn send_tree(socket: Socket, data: BytesTree) -> Result(Nil, SocketError)
+
 @external(erlang, "fcgi_ffi", "close_file")
 pub fn close_file(handle: Handle) -> Nil
 
@@ -468,55 +471,71 @@ fn try_send_response(
   request_id: Int,
   response: Response(ResponseData),
 ) -> Result(Nil, Nil) {
-  use _ <- result.try(
+  let header = handler.encode_response_header(request_id, response)
+  let terminator = handler.encode_response_terminator(request_id)
+  case response.body {
+    Bytes(data) -> {
+      let body = handler.encode_stdout_chunk(request_id, data)
+      let combined =
+        header
+        |> bytes_tree.append_tree(body)
+        |> bytes_tree.append_tree(terminator)
+      send_if_nonempty(socket, combined)
+      |> result.replace_error(Nil)
+    }
+    File(handle, offset, length) -> {
+      use _ <- result.try(
+        send_tree(socket, header)
+        |> result.replace_error(Nil),
+      )
+      use _ <- result.try(send_file_body(
+        socket,
+        request_id,
+        handle,
+        offset,
+        length,
+      ))
+      send_tree(socket, terminator)
+      |> result.replace_error(Nil)
+    }
+    Stream(producer) -> {
+      use _ <- result.try(
+        send_tree(socket, header)
+        |> result.replace_error(Nil),
+      )
+      let sender = stream_sender(socket, request_id)
+      let _ = exception.rescue(fn() { producer(sender) })
+      send_tree(socket, terminator)
+      |> result.replace_error(Nil)
+    }
+  }
+}
+
+fn send_file_body(
+  socket: Socket,
+  request_id: Int,
+  handle: Handle,
+  offset: Int,
+  length: Int,
+) -> Result(Nil, Nil) {
+  use <- exception.defer(fn() { close_file(handle) })
+  send_via_sendfile(socket, request_id, handle, offset, length)
+}
+
+fn stream_sender(socket: Socket, request_id: Int) -> StreamSender {
+  StreamSender(emit: fn(data) {
     send_if_nonempty(
       socket,
-      handler.encode_response_header(request_id, response),
+      handler.encode_stdout_chunk(request_id, bytes_tree.from_bit_array(data)),
     )
-    |> result.replace_error(Nil),
-  )
-  use _ <- result.try(send_response_body(socket, request_id, response.body))
-  send_if_nonempty(socket, handler.encode_response_terminator(request_id))
-  |> result.replace_error(Nil)
+    |> result.replace_error(Nil)
+  })
 }
 
 fn error_response(status: Int, message: String) -> Response(ResponseData) {
   response.new(status)
   |> response.set_header("content-type", "text/plain; charset=utf-8")
   |> response.set_body(Bytes(bytes_tree.from_string(message)))
-}
-
-fn send_response_body(
-  socket: Socket,
-  request_id: Int,
-  body: ResponseData,
-) -> Result(Nil, Nil) {
-  case body {
-    Bytes(data) -> {
-      let _ =
-        send_if_nonempty(
-          socket,
-          handler.encode_response_body_tree(request_id, data),
-        )
-      Ok(Nil)
-    }
-    File(handle, offset, length) -> {
-      use <- exception.defer(fn() { close_file(handle) })
-      send_via_sendfile(socket, request_id, handle, offset, length)
-    }
-    Stream(producer) -> {
-      let sender =
-        StreamSender(emit: fn(data) {
-          send_if_nonempty(
-            socket,
-            handler.encode_stdout_chunk(request_id, data),
-          )
-          |> result.replace_error(Nil)
-        })
-      let _ = exception.rescue(fn() { producer(sender) })
-      Ok(Nil)
-    }
-  }
 }
 
 fn send_via_sendfile(
@@ -734,6 +753,6 @@ fn send_if_nonempty(
 ) -> Result(Nil, SocketError) {
   case bytes_tree.byte_size(bytes) {
     0 -> Ok(Nil)
-    _ -> send(socket, bytes_tree.to_bit_array(bytes))
+    _ -> send_tree(socket, bytes)
   }
 }

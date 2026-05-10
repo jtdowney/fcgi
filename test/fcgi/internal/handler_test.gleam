@@ -19,7 +19,7 @@ fn response_payload_string(
   let bytes =
     bytes_tree.new()
     |> bytes_tree.append_tree(handler.encode_response_header(1, resp))
-    |> bytes_tree.append_tree(handler.encode_response_body_tree(1, tree))
+    |> bytes_tree.append_tree(handler.encode_stdout_chunk(1, tree))
     |> bytes_tree.append_tree(handler.encode_response_terminator(1))
     |> bytes_tree.to_bit_array
   let assert Ok(records) = helpers.decode_all_records(bytes)
@@ -944,7 +944,7 @@ pub fn writes_bytes_response_with_cgi_header_block_test() {
   let bytes =
     bytes_tree.new()
     |> bytes_tree.append_tree(handler.encode_response_header(1, resp))
-    |> bytes_tree.append_tree(handler.encode_response_body_tree(1, tree))
+    |> bytes_tree.append_tree(handler.encode_stdout_chunk(1, tree))
     |> bytes_tree.append_tree(handler.encode_response_terminator(1))
     |> bytes_tree.to_bit_array
 
