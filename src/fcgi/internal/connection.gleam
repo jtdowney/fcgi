@@ -69,7 +69,7 @@ pub fn recv(
 ) -> Result(BitArray, SocketError)
 
 @external(erlang, "fcgi_ffi", "send")
-pub fn send(socket: Socket, data: BitArray) -> Result(Nil, SocketError)
+pub fn send_bits(socket: Socket, data: BitArray) -> Result(Nil, SocketError)
 
 @external(erlang, "fcgi_ffi", "send")
 fn send_tree(socket: Socket, data: BytesTree) -> Result(Nil, SocketError)
@@ -544,7 +544,7 @@ fn send_via_sendfile(
   let padding_length = protocol.padding_for(chunk_size)
   let header = encode_stdout_header(request_id, chunk_size, padding_length)
   use _ <- result.try(
-    send(socket, header)
+    send_bits(socket, header)
     |> result.replace_error(Nil),
   )
   use _ <- result.try(drain_sendfile_loop(socket, handle, offset, chunk_size))
@@ -596,7 +596,7 @@ fn send_padding(
   padding_length: Int,
 ) -> Result(Nil, SocketError) {
   use <- bool.guard(when: padding_length == 0, return: Ok(Nil))
-  send(socket, <<0:size({ padding_length * 8 })>>)
+  send_bits(socket, <<0:size({ padding_length * 8 })>>)
 }
 
 fn build_request(params_bytes: BitArray) -> Result(Request(Nil), String) {

@@ -50,7 +50,7 @@ fn wrap_chunk(
   |> result.replace_error(Nil)
   |> result.map(fn(chunk) {
     case chunk {
-      fcgi.EndOfBody -> wisp_internal.ReadingFinished
+      fcgi.ReadingFinished -> wisp_internal.ReadingFinished
       fcgi.Chunk(data, consume) ->
         wisp_internal.Chunk(data, fn(_size) { wrap_chunk(consume()) })
     }

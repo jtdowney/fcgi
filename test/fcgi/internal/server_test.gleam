@@ -37,7 +37,7 @@ pub fn server_serves_request_over_unix_test() {
       body: <<>>,
       keep_conn: False,
     )
-  let assert Ok(_) = connection.send(client, request_bytes)
+  let assert Ok(_) = connection.send_bits(client, request_bytes)
 
   let received = helpers.recv_until_closed(client)
   connection.close_socket(client)

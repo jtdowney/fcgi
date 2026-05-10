@@ -33,21 +33,19 @@ pub opaque type Builder {
 /// Why the listener could not start.
 pub type StartError {
   /// Wraps a failure from the underlying listener, such as bind or listen
-  /// failures. `reason` is a human-readable string describing the underlying
-  /// error.
+  /// failures.
   ListenerError(reason: String)
   /// The requested Unix socket path already exists. Remove it before
   /// starting, or pick a different path.
   SocketPathExists(path: String)
-  /// `max_body_size` was set to a negative value. Use `0` to reject all
-  /// non-empty bodies, or any positive value for a real limit.
+  /// `max_body_size` was set to a negative value.
   InvalidMaxBodySize(bytes: Int)
-  /// `body_read_timeout` was set to a non-positive value.
+  /// `body_read_timeout` was set to a negative value.
   InvalidBodyReadTimeout(milliseconds: Int)
 }
 
-/// A running server. Use `stop` to shut the server down.
-pub opaque type Started {
+/// A running server.
+pub opaque type Server {
   Started(server: server.Server)
 }
 
@@ -104,7 +102,7 @@ pub fn new(handler: fn(Request(Body)) -> Response(ResponseData)) -> Builder {
 }
 
 /// Start the server. Returns `Started`, or `StartError` on failure.
-pub fn start(builder: Builder) -> Result(Started, StartError) {
+pub fn start(builder: Builder) -> Result(Server, StartError) {
   use <- bool.guard(
     when: builder.path == "",
     return: Error(ListenerError("listen_path must be called with a socket path")),
@@ -132,7 +130,7 @@ pub fn start(builder: Builder) -> Result(Started, StartError) {
 
 /// Stop the running server. Closes the listening socket, terminates all
 /// open connection actors, and removes the socket path.
-pub fn stop(started: Started) -> Nil {
+pub fn stop(started: Server) -> Nil {
   let Started(srv) = started
   server.stop(srv)
 }
@@ -147,7 +145,7 @@ pub fn stop(started: Started) -> Nil {
 /// When the parent supervisor terminates the child, the FastCGI
 /// supervisor and its workers shut down, the listening socket is
 /// released by the runtime, and the Unix socket path is unlinked.
-pub fn supervised(builder: Builder) -> supervision.ChildSpecification(Started) {
+pub fn supervised(builder: Builder) -> supervision.ChildSpecification(Server) {
   supervision.supervisor(fn() {
     case start(builder) {
       Error(ListenerError(reason)) -> Error(actor.InitFailed(reason))
@@ -203,7 +201,7 @@ pub type FileError {
   FileIsDirectory(path: String)
   /// Any other filesystem error, with the underlying reason as a human-readable string.
   FileOther(path: String, reason: String)
-  /// `offset` is negative, or `limit` is `Some(n)` with `n < 0`. The filesystem is not touched in this case.
+  /// `offset` is negative, or `limit` is `Some(n)` with `n < 0`.
   InvalidRange(offset: Int, limit: Option(Int))
 }
 
@@ -211,7 +209,7 @@ pub type FileError {
 /// `file:sendfile/5` when the response is sent.
 ///
 /// The file is opened eagerly so the response holds an open file
-/// descriptor — the path may be unlinked before the response is sent
+/// descriptor: the path may be unlinked before the response is sent
 /// (for example by a deferred temp-file cleanup) and streaming will
 /// still succeed. The handle is closed by the connection actor after
 /// streaming completes.
@@ -222,7 +220,7 @@ pub type FileError {
 /// stream from `offset` through end-of-file.
 ///
 /// If `send_file` returns `Ok(body)`, the caller must use `body` as the
-/// response body — discarding it leaks the file descriptor until the
+/// response body; discarding it leaks the file descriptor until the
 /// connection actor exits.
 ///
 /// Returns `FileError` if the file is missing, inaccessible, a
@@ -315,7 +313,7 @@ pub type Read {
   /// the next chunk when called.
   Chunk(data: BitArray, consume: fn() -> Result(Read, ReadError))
   /// The body has been fully delivered.
-  EndOfBody
+  ReadingFinished
 }
 
 /// Why a `read_chunk` or `read_all` failed.
@@ -323,25 +321,24 @@ pub type ReadError {
   /// The connection from the upstream proxy was closed before the body
   /// was fully delivered.
   ClientDisconnected
-  /// No chunk arrived within the configured `body_read_timeout`. The
-  /// upstream proxy is slow, stalled, or has stopped sending stdin.
+  /// No chunk arrived within the configured `body_read_timeout`.
   ReadTimeout
   /// The body exceeded `max_body_size`.
   BodyTooLarge
 }
 
 /// Read the next chunk from the request body. Returns `Chunk(data,
-/// consume)` where `consume` produces the next chunk, or `EndOfBody`
-/// once the body is fully delivered. Blocks for up to the configured
-/// `body_read_timeout` waiting for stdin records.
+/// consume)` where `consume` produces the next chunk, or
+/// `ReadingFinished` once the body is fully delivered. Blocks for up
+/// to the configured `body_read_timeout` waiting for stdin records.
 ///
 /// Each chunk reflects whatever the upstream proxy sent in the latest
 /// stdin record (typically up to ~64 KB). Slice the returned `data`
 /// further if you need smaller pieces.
 ///
-/// `EndOfBody` signals that the upstream proxy closed stdin, not that
-/// the consumed byte count matches the `CONTENT_LENGTH` header. The
-/// header is forwarded on the request but not enforced against the
+/// `ReadingFinished` signals that the upstream proxy closed stdin, not
+/// that the consumed byte count matches the `CONTENT_LENGTH` header.
+/// The header is forwarded on the request but not enforced against the
 /// stream. Handlers that need the guarantee should compare bytes
 /// consumed against `request.get_header(req, "content-length")`.
 pub fn read_chunk(body: Body) -> Result(Read, ReadError) {
@@ -352,7 +349,7 @@ fn read_step(reader: connection.BodyReader) -> Result(Read, ReadError) {
   case reader() {
     Ok(connection.BodyMore(data, next)) ->
       Ok(Chunk(data:, consume: fn() { read_step(next) }))
-    Ok(connection.BodyEnded) -> Ok(EndOfBody)
+    Ok(connection.BodyEnded) -> Ok(ReadingFinished)
     Error(connection.ConnectionLost) -> Error(ClientDisconnected)
     Error(connection.Timeout) -> Error(ReadTimeout)
     Error(connection.TooLarge) -> Error(BodyTooLarge)
@@ -377,7 +374,7 @@ fn read_all_loop(
 ) -> Result(BytesTree, ReadError) {
   case read {
     Error(reason) -> Error(reason)
-    Ok(EndOfBody) -> Ok(acc)
+    Ok(ReadingFinished) -> Ok(acc)
     Ok(Chunk(data, consume)) ->
       read_all_loop(consume(), bytes_tree.append(acc, data))
   }

@@ -34,6 +34,35 @@ fn simple_get_request_bytes() -> BitArray {
   )
 }
 
+fn echo_post_request_bytes(
+  request_id: Int,
+  body_text: String,
+  keep_conn: Bool,
+) -> BitArray {
+  let body_bytes = bit_array.from_string(body_text)
+  helpers.request_stream_bytes(
+    request_id:,
+    params: [
+      #("REQUEST_METHOD", "POST"),
+      #("CONTENT_LENGTH", int.to_string(bit_array.byte_size(body_bytes))),
+      #("CONTENT_TYPE", "text/plain"),
+    ],
+    body: body_bytes,
+    keep_conn:,
+  )
+}
+
+fn echo_handler(
+  req: Request(fcgi.Body),
+) -> response.Response(fcgi.ResponseData) {
+  let assert Ok(tree) = fcgi.read_all(req.body)
+  let bytes = bytes_tree.to_bit_array(tree)
+  let assert Ok(text) = bit_array.to_string(bytes)
+  response.new(200)
+  |> response.set_header("content-type", "text/plain")
+  |> response.set_body(fcgi.bytes(bytes_tree.from_string("echo:" <> text)))
+}
+
 fn run_handler_with_body(
   build_body: fn() -> fcgi.ResponseData,
   request_bytes: BitArray,
@@ -52,7 +81,7 @@ fn run_handler_with_body(
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, request_bytes)
+  let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -62,24 +91,6 @@ fn run_handler_with_body(
   let assert Ok(text) = bit_array.to_string(stdout_payload)
   let assert Ok(#(_headers, body_text)) = string.split_once(text, "\r\n\r\n")
   body_text
-}
-
-fn drain_chunks(body: fcgi.Body, acc: List(String)) -> List(String) {
-  drain_chunks_loop(fcgi.read_chunk(body), acc)
-}
-
-fn drain_chunks_loop(
-  result: Result(fcgi.Read, fcgi.ReadError),
-  acc: List(String),
-) -> List(String) {
-  case result {
-    Error(_) -> acc
-    Ok(fcgi.EndOfBody) -> acc
-    Ok(fcgi.Chunk(data, consume)) -> {
-      let assert Ok(text) = bit_array.to_string(data)
-      drain_chunks_loop(consume(), [text, ..acc])
-    }
-  }
 }
 
 fn run_unreachable_handler(request_bytes: BitArray) -> String {
@@ -98,7 +109,7 @@ fn run_unreachable_handler(request_bytes: BitArray) -> String {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, request_bytes)
+  let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -107,6 +118,49 @@ fn run_unreachable_handler(request_bytes: BitArray) -> String {
   let stdout_payload = helpers.collect_stdout(records)
   let assert Ok(text) = bit_array.to_string(stdout_payload)
   text
+}
+
+fn drain_chunks(body: fcgi.Body, acc: List(String)) -> List(String) {
+  drain_chunks_loop(fcgi.read_chunk(body), acc)
+}
+
+fn drain_chunks_loop(
+  result: Result(fcgi.Read, fcgi.ReadError),
+  acc: List(String),
+) -> List(String) {
+  case result {
+    Error(_) -> acc
+    Ok(fcgi.ReadingFinished) -> acc
+    Ok(fcgi.Chunk(data, consume)) -> {
+      let assert Ok(text) = bit_array.to_string(data)
+      drain_chunks_loop(consume(), [text, ..acc])
+    }
+  }
+}
+
+fn body_for_request_id(
+  records: List(protocol.Outgoing),
+  request_id: Int,
+) -> String {
+  let stdout =
+    list.fold(records, <<>>, fn(acc, record) {
+      case record {
+        protocol.Stdout(id, data) if id == request_id -> <<acc:bits, data:bits>>
+        _ -> acc
+      }
+    })
+  let assert Ok(text) = bit_array.to_string(stdout)
+  let assert Ok(#(_headers, body_text)) = string.split_once(text, "\r\n\r\n")
+  body_text
+}
+
+fn end_request_for(records: List(protocol.Outgoing), request_id: Int) -> Bool {
+  list.any(records, fn(record) {
+    case record {
+      protocol.EndRequest(id, _, _) if id == request_id -> True
+      _ -> False
+    }
+  })
 }
 
 pub fn end_to_end_get_returns_handler_body_test() {
@@ -124,7 +178,7 @@ pub fn end_to_end_get_returns_handler_body_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, simple_get_request_bytes())
+  let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -198,7 +252,7 @@ pub fn file_unlinked_after_send_file_still_streams_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(socket_path)
-  let assert Ok(_) = connection.send(socket, simple_get_request_bytes())
+  let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -362,7 +416,7 @@ pub fn builder_max_body_size_rejects_oversized_body_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, request_bytes)
+  let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -397,7 +451,7 @@ pub fn handler_panic_returns_500_response_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, simple_get_request_bytes())
+  let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -437,7 +491,7 @@ pub fn content_length_non_numeric_returns_400_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, request_bytes)
+  let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -469,7 +523,7 @@ pub fn content_length_negative_returns_400_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, request_bytes)
+  let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -512,7 +566,7 @@ pub fn request_body_is_passed_through_to_handler_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, request_bytes)
+  let assert Ok(_) = connection.send_bits(socket, request_bytes)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -566,15 +620,16 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, <<begin:bits, real_params:bits>>)
+  let assert Ok(_) =
+    connection.send_bits(socket, <<begin:bits, real_params:bits>>)
   process.sleep(20)
-  let assert Ok(_) = connection.send(socket, params_end)
+  let assert Ok(_) = connection.send_bits(socket, params_end)
   process.sleep(20)
-  let assert Ok(_) = connection.send(socket, stdin_one)
+  let assert Ok(_) = connection.send_bits(socket, stdin_one)
   process.sleep(20)
-  let assert Ok(_) = connection.send(socket, stdin_two)
+  let assert Ok(_) = connection.send_bits(socket, stdin_two)
   process.sleep(20)
-  let assert Ok(_) = connection.send(socket, stdin_end)
+  let assert Ok(_) = connection.send_bits(socket, stdin_end)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -607,7 +662,7 @@ pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, simple_get_request_bytes())
+  let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -657,7 +712,7 @@ pub fn stream_send_chunk_splits_large_payload_into_max_size_records_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, simple_get_request_bytes())
+  let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 5000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -699,7 +754,7 @@ pub fn stream_producer_panic_still_emits_end_request_test() {
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, simple_get_request_bytes())
+  let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -772,7 +827,7 @@ pub fn supervised_spec_starts_and_serves_request_test() {
   assert process.is_alive(sup_pid)
 
   let assert Ok(socket) = test_client.connect(path)
-  let assert Ok(_) = connection.send(socket, simple_get_request_bytes())
+  let assert Ok(_) = connection.send_bits(socket, simple_get_request_bytes())
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
 
@@ -881,60 +936,6 @@ pub fn socket_path_unlinks_on_stop_test() {
   assert simplifile.is_file(path) == Ok(False)
 }
 
-fn echo_post_request_bytes(
-  request_id: Int,
-  body_text: String,
-  keep_conn: Bool,
-) -> BitArray {
-  let body_bytes = <<body_text:utf8>>
-  helpers.request_stream_bytes(
-    request_id:,
-    params: [
-      #("REQUEST_METHOD", "POST"),
-      #("CONTENT_LENGTH", int.to_string(bit_array.byte_size(body_bytes))),
-      #("CONTENT_TYPE", "text/plain"),
-    ],
-    body: body_bytes,
-    keep_conn:,
-  )
-}
-
-fn body_for_request_id(
-  records: List(protocol.Outgoing),
-  request_id: Int,
-) -> String {
-  let stdout =
-    list.fold(records, <<>>, fn(acc, record) {
-      case record {
-        protocol.Stdout(id, data) if id == request_id -> <<acc:bits, data:bits>>
-        _ -> acc
-      }
-    })
-  let assert Ok(text) = bit_array.to_string(stdout)
-  let assert Ok(#(_headers, body_text)) = string.split_once(text, "\r\n\r\n")
-  body_text
-}
-
-fn end_request_for(records: List(protocol.Outgoing), request_id: Int) -> Bool {
-  list.any(records, fn(record) {
-    case record {
-      protocol.EndRequest(id, _, _) if id == request_id -> True
-      _ -> False
-    }
-  })
-}
-
-fn echo_handler(
-  req: Request(fcgi.Body),
-) -> response.Response(fcgi.ResponseData) {
-  let assert Ok(tree) = fcgi.read_all(req.body)
-  let bytes = bytes_tree.to_bit_array(tree)
-  let assert Ok(text) = bit_array.to_string(bytes)
-  response.new(200)
-  |> response.set_header("content-type", "text/plain")
-  |> response.set_body(fcgi.bytes(bytes_tree.from_string("echo:" <> text)))
-}
-
 pub fn keep_alive_streams_two_sequential_requests_on_one_socket_test() {
   use path <- helpers.with_temp_socket_path
   let assert Ok(started) =
@@ -945,11 +946,11 @@ pub fn keep_alive_streams_two_sequential_requests_on_one_socket_test() {
 
   let assert Ok(socket) = test_client.connect(path)
   let assert Ok(_) =
-    connection.send(socket, echo_post_request_bytes(1, "first", True))
+    connection.send_bits(socket, echo_post_request_bytes(1, "first", True))
   let assert Ok(resp1) = test_client.recv_all(socket, 1000)
 
   let assert Ok(_) =
-    connection.send(socket, echo_post_request_bytes(2, "second", False))
+    connection.send_bits(socket, echo_post_request_bytes(2, "second", False))
   let assert Ok(resp2) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -976,7 +977,7 @@ pub fn keep_alive_handles_pipelined_requests_in_one_send_test() {
     echo_post_request_bytes(1, "alpha", True):bits,
     echo_post_request_bytes(2, "beta", False):bits,
   >>
-  let assert Ok(_) = connection.send(socket, pipelined)
+  let assert Ok(_) = connection.send_bits(socket, pipelined)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -1003,11 +1004,14 @@ pub fn keep_alive_drains_unread_body_before_next_request_test() {
 
   let assert Ok(socket) = test_client.connect(path)
   let assert Ok(_) =
-    connection.send(socket, echo_post_request_bytes(1, "unread-body", True))
+    connection.send_bits(
+      socket,
+      echo_post_request_bytes(1, "unread-body", True),
+    )
   let assert Ok(resp1) = test_client.recv_all(socket, 1000)
 
   let assert Ok(_) =
-    connection.send(socket, echo_post_request_bytes(2, "follow-up", False))
+    connection.send_bits(socket, echo_post_request_bytes(2, "follow-up", False))
   let assert Ok(resp2) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
   fcgi.stop(started)
@@ -1031,10 +1035,10 @@ pub fn keep_conn_false_closes_socket_after_response_test() {
 
   let assert Ok(socket) = test_client.connect(path)
   let assert Ok(_) =
-    connection.send(socket, echo_post_request_bytes(1, "only", False))
+    connection.send_bits(socket, echo_post_request_bytes(1, "only", False))
   let assert Ok(resp) = test_client.recv_all(socket, 1000)
   let second_send =
-    connection.send(socket, echo_post_request_bytes(2, "ignored", False))
+    connection.send_bits(socket, echo_post_request_bytes(2, "ignored", False))
   connection.close_socket(socket)
   fcgi.stop(started)
 
@@ -1076,10 +1080,13 @@ pub fn keep_alive_does_not_loop_when_body_overflows_test() {
 
   let assert Ok(socket) = test_client.connect(path)
   let assert Ok(_) =
-    connection.send(socket, echo_post_request_bytes(1, "way-too-long", True))
+    connection.send_bits(
+      socket,
+      echo_post_request_bytes(1, "way-too-long", True),
+    )
   let assert Ok(resp1) = test_client.recv_all(socket, 1000)
   let second_send =
-    connection.send(socket, echo_post_request_bytes(2, "later", False))
+    connection.send_bits(socket, echo_post_request_bytes(2, "later", False))
   connection.close_socket(socket)
   fcgi.stop(started)
 

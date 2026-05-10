@@ -46,7 +46,7 @@ pub fn connection_actor_serves_one_request_test() {
       body: <<>>,
       keep_conn: False,
     )
-  let assert Ok(_) = connection.send(client, request_bytes)
+  let assert Ok(_) = connection.send_bits(client, request_bytes)
 
   let received = helpers.recv_until_closed(client)
   connection.close_socket(client)
@@ -133,7 +133,7 @@ pub fn connection_actor_streams_file_test() {
       body: <<>>,
       keep_conn: False,
     )
-  let assert Ok(_) = connection.send(client, request_bytes)
+  let assert Ok(_) = connection.send_bits(client, request_bytes)
 
   let received = helpers.recv_until_closed(client)
   connection.close_socket(client)
@@ -194,7 +194,7 @@ pub fn read_chunk_returns_timeout_when_stdin_stalls_test() {
   let params_end =
     protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
   let request_bytes = <<begin:bits, params:bits, params_end:bits>>
-  let assert Ok(_) = connection.send(client, request_bytes)
+  let assert Ok(_) = connection.send_bits(client, request_bytes)
 
   let received = helpers.recv_until_closed(client)
   connection.close_socket(client)
@@ -246,7 +246,7 @@ pub fn connection_actor_runs_stream_producer_test() {
       body: <<>>,
       keep_conn: False,
     )
-  let assert Ok(_) = connection.send(client, request_bytes)
+  let assert Ok(_) = connection.send_bits(client, request_bytes)
 
   let received = helpers.recv_until_closed(client)
   connection.close_socket(client)

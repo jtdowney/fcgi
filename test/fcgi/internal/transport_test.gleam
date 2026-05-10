@@ -19,12 +19,12 @@ pub fn unix_round_trip_echoes_bytes_test() {
   process.spawn(fn() {
     let assert Ok(server) = connection.accept(listen_sock)
     let assert Ok(bytes) = connection.recv(server, 5, 1000)
-    let assert Ok(_) = connection.send(server, bytes)
+    let assert Ok(_) = connection.send_bits(server, bytes)
     connection.close_socket(server)
   })
 
   let assert Ok(client) = test_client.connect(path)
-  let assert Ok(_) = connection.send(client, <<"hello":utf8>>)
+  let assert Ok(_) = connection.send_bits(client, <<"hello":utf8>>)
   let assert Ok(echoed) = connection.recv(client, 5, 1000)
   assert echoed == <<"hello":utf8>>
 
