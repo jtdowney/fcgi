@@ -18,13 +18,17 @@ const default_body_read_timeout_ms = 30_000
 
 const default_max_body_size = 268_435_456
 
+pub type HasPath
+
+pub type MissingPath
+
 /// Server configuration produced by `new` and refined by `listen_path`,
 /// `max_body_size`, and `body_read_timeout`. Pass it to `start` to begin
 /// listening.
-pub opaque type Builder {
+pub opaque type Builder(path) {
   Builder(
     handler: fn(Request(Body)) -> Response(ResponseData),
-    path: String,
+    path: Option(String),
     max_body_size: Int,
     body_read_timeout_ms: Int,
   )
@@ -51,8 +55,8 @@ pub opaque type Server {
 
 /// Set the Unix domain socket path the server listens on. The path must
 /// not already exist; `start` returns `SocketPathExists(path)` if it does.
-pub fn listen_path(builder: Builder, path: String) -> Builder {
-  Builder(..builder, path:)
+pub fn listen_path(builder: Builder(path), path: String) -> Builder(HasPath) {
+  Builder(..builder, path: option.Some(path))
 }
 
 /// Set the maximum body bytes the server will deliver to the handler in
@@ -70,7 +74,7 @@ pub fn listen_path(builder: Builder, path: String) -> Builder {
 /// fixed 64 KiB per request and not configurable here. Requests that
 /// exceed the cap are rejected with an `Overloaded` end record before
 /// the handler runs.
-pub fn max_body_size(builder: Builder, bytes: Int) -> Builder {
+pub fn max_body_size(builder: Builder(path), bytes: Int) -> Builder(path) {
   Builder(..builder, max_body_size: bytes)
 }
 
@@ -80,7 +84,10 @@ pub fn max_body_size(builder: Builder, bytes: Int) -> Builder {
 ///
 /// Applies between successive chunk reads, not to the request as a
 /// whole. Default: 30,000 ms.
-pub fn body_read_timeout(builder: Builder, milliseconds: Int) -> Builder {
+pub fn body_read_timeout(
+  builder: Builder(path),
+  milliseconds: Int,
+) -> Builder(path) {
   Builder(..builder, body_read_timeout_ms: milliseconds)
 }
 
@@ -92,21 +99,19 @@ pub fn body_read_timeout(builder: Builder, milliseconds: Int) -> Builder {
 /// `read_all` for the buffered case) to consume it.
 ///
 /// Default: 256 MiB max body, 30 s body read timeout.
-pub fn new(handler: fn(Request(Body)) -> Response(ResponseData)) -> Builder {
+pub fn new(
+  handler: fn(Request(Body)) -> Response(ResponseData),
+) -> Builder(MissingPath) {
   Builder(
     handler:,
-    path: "",
+    path: option.None,
     max_body_size: default_max_body_size,
     body_read_timeout_ms: default_body_read_timeout_ms,
   )
 }
 
 /// Start the server. Returns `Started`, or `StartError` on failure.
-pub fn start(builder: Builder) -> Result(Server, StartError) {
-  use <- bool.guard(
-    when: builder.path == "",
-    return: Error(ListenerError("listen_path must be called with a socket path")),
-  )
+pub fn start(builder: Builder(HasPath)) -> Result(Server, StartError) {
   use <- bool.guard(
     when: builder.max_body_size < 0,
     return: Error(InvalidMaxBodySize(builder.max_body_size)),
@@ -121,7 +126,9 @@ pub fn start(builder: Builder) -> Result(Server, StartError) {
       body_read_timeout_ms: builder.body_read_timeout_ms,
       handler: wrap_handler(builder.handler),
     )
-  case server.start(builder.path, template) {
+
+  let assert option.Some(path) = builder.path
+  case server.start(path, template) {
     Error(server.ListenerError(reason)) -> Error(ListenerError(reason))
     Error(server.SocketPathExists(path)) -> Error(SocketPathExists(path))
     Ok(srv) -> Ok(Started(server: srv))
@@ -145,7 +152,9 @@ pub fn stop(started: Server) -> Nil {
 /// When the parent supervisor terminates the child, the FastCGI
 /// supervisor and its workers shut down, the listening socket is
 /// released by the runtime, and the Unix socket path is unlinked.
-pub fn supervised(builder: Builder) -> supervision.ChildSpecification(Server) {
+pub fn supervised(
+  builder: Builder(HasPath),
+) -> supervision.ChildSpecification(Server) {
   supervision.supervisor(fn() {
     case start(builder) {
       Error(ListenerError(reason)) -> Error(actor.InitFailed(reason))

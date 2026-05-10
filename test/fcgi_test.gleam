@@ -876,18 +876,6 @@ pub fn socket_path_already_exists_returns_error_test() {
   assert reported == path
 }
 
-pub fn start_without_listen_path_returns_error_test() {
-  let handler = fn(_req: Request(fcgi.Body)) {
-    response.new(200) |> response.set_body(fcgi.bytes(bytes_tree.new()))
-  }
-
-  let assert Error(fcgi.ListenerError(reason)) =
-    handler
-    |> fcgi.new
-    |> fcgi.start
-  assert reason == "listen_path must be called with a socket path"
-}
-
 pub fn negative_max_body_size_returns_error_test() {
   use path <- helpers.with_temp_socket_path
   let handler = fn(_req: Request(fcgi.Body)) {
