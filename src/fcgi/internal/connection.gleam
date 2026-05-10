@@ -173,17 +173,19 @@ fn run_connection_loop(
   case feed_until_request_or_end(spec, state, pending) {
     FeedReachedEnd -> Nil
     FeedReachedRequest(fsm_state, request_id, params, body_queue, keep_conn) -> {
-      handle_one_request(
-        spec,
-        tracker,
-        fsm_state,
-        request_id,
-        params,
-        body_queue,
-      )
-      case keep_conn {
-        False -> Nil
-        True ->
+      let send_result =
+        handle_one_request(
+          spec,
+          tracker,
+          fsm_state,
+          request_id,
+          params,
+          body_queue,
+        )
+      case send_result, keep_conn {
+        Error(_), _ -> Nil
+        Ok(_), False -> Nil
+        Ok(_), True ->
           case finalize_request(spec, tracker) {
             Error(_) -> Nil
             Ok(next_state) -> run_connection_loop(spec, next_state, <<>>)
@@ -257,7 +259,7 @@ fn handle_one_request(
   request_id: Int,
   params: BitArray,
   body_queue: List(handler.Event),
-) -> Nil {
+) -> Result(Nil, Nil) {
   use <- bool.lazy_guard(
     when: list.contains(body_queue, handler.BodyTooLarge),
     return: fn() { send_overloaded(spec.socket, request_id) },
@@ -275,9 +277,9 @@ fn handle_one_request(
   }
 }
 
-fn send_overloaded(socket: Socket, request_id: Int) -> Nil {
-  let _ = send_if_nonempty(socket, handler.encode_overloaded_end(request_id))
-  Nil
+fn send_overloaded(socket: Socket, request_id: Int) -> Result(Nil, Nil) {
+  send_if_nonempty(socket, handler.encode_overloaded_end(request_id))
+  |> result.replace_error(Nil)
 }
 
 fn finalize_request(
@@ -458,15 +460,6 @@ fn collect_body_events(
 }
 
 fn send_response(
-  socket: Socket,
-  request_id: Int,
-  response: Response(ResponseData),
-) -> Nil {
-  let _ = try_send_response(socket, request_id, response)
-  Nil
-}
-
-fn try_send_response(
   socket: Socket,
   request_id: Int,
   response: Response(ResponseData),
