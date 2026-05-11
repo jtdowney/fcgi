@@ -649,6 +649,58 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
   assert summary == "AAA,BBB"
 }
 
+pub fn builder_body_read_timeout_surfaces_to_read_chunk_test() {
+  use path <- helpers.with_temp_socket_path
+  let begin =
+    protocol.encode_incoming(protocol.BeginRequest(
+      request_id: 1,
+      role: protocol.responder_role,
+      keep_conn: False,
+    ))
+  let real_params =
+    protocol.encode_incoming(protocol.Params(
+      request_id: 1,
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
+    ))
+  let params_end =
+    protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+
+  let handler = fn(req: Request(fcgi.Body)) {
+    let body = case fcgi.read_chunk(req.body) {
+      Error(fcgi.ReadTimeout) -> "timeout"
+      _ -> "unexpected"
+    }
+    response.new(408)
+    |> response.set_header("content-type", "text/plain")
+    |> response.set_body(fcgi.bytes(bytes_tree.from_string(body)))
+  }
+
+  let assert Ok(started) =
+    handler
+    |> fcgi.new
+    |> fcgi.body_read_timeout(100)
+    |> fcgi.listen_path(path)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect(path)
+  let assert Ok(_) =
+    connection.send_bits(socket, <<
+      begin:bits,
+      real_params:bits,
+      params_end:bits,
+    >>)
+  let assert Ok(bytes) = test_client.recv_all(socket, 1000)
+  connection.close_socket(socket)
+  helpers.stop_supervisor(started)
+
+  let assert Ok(records) = helpers.decode_all_records(bytes)
+  let stdout_payload = helpers.collect_stdout(records)
+  let assert Ok(text) = bit_array.to_string(stdout_payload)
+  let assert Ok(#(_headers, body)) = string.split_once(text, "\r\n\r\n")
+  assert body == "timeout"
+}
+
 pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
   use path <- helpers.with_temp_socket_path
   let handler = fn(_req: Request(fcgi.Body)) {
