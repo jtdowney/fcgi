@@ -560,10 +560,7 @@ fn send_response(
       |> result.replace_error(Nil)
     }
     File(handle, offset, length) -> {
-      use _ <- result.try(
-        send_tree(socket, header)
-        |> result.replace_error(Nil),
-      )
+      use _ <- result.try(try_send_tree(socket, header))
       use _ <- result.try(send_file_body(
         socket,
         request_id,
@@ -571,20 +568,20 @@ fn send_response(
         offset,
         length,
       ))
-      send_tree(socket, terminator)
-      |> result.replace_error(Nil)
+      try_send_tree(socket, terminator)
     }
     Stream(producer) -> {
-      use _ <- result.try(
-        send_tree(socket, header)
-        |> result.replace_error(Nil),
-      )
+      use _ <- result.try(try_send_tree(socket, header))
       let sender = stream_sender(socket, request_id)
       let _ = exception.rescue(fn() { producer(sender) })
-      send_tree(socket, terminator)
-      |> result.replace_error(Nil)
+      try_send_tree(socket, terminator)
     }
   }
+}
+
+fn try_send_tree(socket: Socket, tree: BytesTree) -> Result(Nil, Nil) {
+  send_tree(socket, tree)
+  |> result.replace_error(Nil)
 }
 
 fn send_via_sendfile(
