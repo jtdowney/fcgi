@@ -219,12 +219,17 @@ fn map_file_error(error: connection.FileError, path: String) -> FileError {
 /// data)` writes one or more `STDOUT` records to the upstream proxy.
 /// Useful for long-lived responses such as Server-Sent Events. See
 /// `send_chunk` for the calling convention and caveats.
+///
+/// A panic raised by `producer` is caught; the response terminator is
+/// still emitted so the upstream proxy sees a clean end-of-request.
 pub fn stream(producer: fn(StreamSender) -> Nil) -> ResponseData {
   Stream(producer:)
 }
 
+/// Phantom marker indicating a `Builder` has had `listen_path` set.
 pub type HasPath
 
+/// Phantom marker indicating a `Builder` is missing `listen_path`.
 pub type MissingPath
 
 /// Server configuration produced by `new` and refined by `listen_path`,

@@ -4,8 +4,8 @@
 ////
 //// This adapter imports `wisp/internal` to build a `wisp.Connection`
 //// from a custom body reader. It is, however, not semver-stable: a
-//// future Wisp minor release could rename or reshape `wisp/internal`
-//// without it being treated as a breaking change.
+//// future Wisp patch or minor release could rename or reshape
+//// `wisp/internal` without it being treated as a breaking change.
 
 import exception
 import fcgi
