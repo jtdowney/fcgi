@@ -701,6 +701,62 @@ pub fn builder_body_read_timeout_surfaces_to_read_chunk_test() {
   assert body == "timeout"
 }
 
+pub fn read_chunk_returns_client_disconnected_when_peer_closes_test() {
+  use path <- helpers.with_temp_socket_path
+  let begin =
+    protocol.encode_incoming(protocol.BeginRequest(
+      request_id: 1,
+      role: protocol.responder_role,
+      keep_conn: False,
+    ))
+  let real_params =
+    protocol.encode_incoming(protocol.Params(
+      request_id: 1,
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
+    ))
+  let params_end =
+    protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+  let stdin_partial =
+    protocol.encode_incoming(
+      protocol.Stdin(request_id: 1, data: <<"AAA":utf8>>),
+    )
+
+  let signal = process.new_subject()
+  let handler = fn(req: Request(fcgi.Body)) {
+    let assert Ok(fcgi.Chunk(_, consume)) = fcgi.read_chunk(req.body)
+    process.send(signal, "first-chunk")
+    case consume() {
+      Error(fcgi.ClientDisconnected) -> process.send(signal, "disconnected")
+      _ -> process.send(signal, "unexpected")
+    }
+    response.new(200)
+    |> response.set_header("content-type", "text/plain")
+    |> response.set_body(fcgi.bytes(bytes_tree.from_string("ok")))
+  }
+
+  let assert Ok(started) =
+    handler
+    |> fcgi.new
+    |> fcgi.listen_path(path)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect(path)
+  let assert Ok(_) =
+    connection.send_bits(socket, <<
+      begin:bits,
+      real_params:bits,
+      params_end:bits,
+      stdin_partial:bits,
+    >>)
+  let assert Ok("first-chunk") = process.receive(signal, 1000)
+  connection.close_socket(socket)
+  let assert Ok(observed) = process.receive(signal, 1000)
+  helpers.stop_supervisor(started)
+
+  assert observed == "disconnected"
+}
+
 pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
   use path <- helpers.with_temp_socket_path
   let handler = fn(_req: Request(fcgi.Body)) {
