@@ -120,12 +120,17 @@ fn run_unreachable_handler(request_bytes: BitArray) -> String {
   text
 }
 
-fn drain_chunks(body: fcgi.Body, acc: List(String)) -> List(String) {
-  drain_chunks_loop(fcgi.read_chunk(body), acc)
+fn drain_chunks(
+  body: fcgi.Body,
+  signal: process.Subject(String),
+  acc: List(String),
+) -> List(String) {
+  drain_chunks_loop(fcgi.read_chunk(body), signal, acc)
 }
 
 fn drain_chunks_loop(
   result: Result(fcgi.Read, fcgi.ReadError),
+  signal: process.Subject(String),
   acc: List(String),
 ) -> List(String) {
   case result {
@@ -133,7 +138,8 @@ fn drain_chunks_loop(
     Ok(fcgi.ReadingFinished) -> acc
     Ok(fcgi.Chunk(data, consume)) -> {
       let assert Ok(text) = bit_array.to_string(data)
-      drain_chunks_loop(consume(), [text, ..acc])
+      process.send(signal, text)
+      drain_chunks_loop(consume(), signal, [text, ..acc])
     }
   }
 }
@@ -605,8 +611,9 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
   let stdin_end =
     protocol.encode_incoming(protocol.Stdin(request_id: 1, data: <<>>))
 
+  let signal = process.new_subject()
   let handler = fn(req: Request(fcgi.Body)) {
-    let lines = drain_chunks(req.body, [])
+    let lines = drain_chunks(req.body, signal, [])
     let summary = string.join(list.reverse(lines), ",")
     response.new(200)
     |> response.set_header("content-type", "text/plain")
@@ -621,14 +628,15 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
 
   let assert Ok(socket) = test_client.connect(path)
   let assert Ok(_) =
-    connection.send_bits(socket, <<begin:bits, real_params:bits>>)
-  process.sleep(20)
-  let assert Ok(_) = connection.send_bits(socket, params_end)
-  process.sleep(20)
-  let assert Ok(_) = connection.send_bits(socket, stdin_one)
-  process.sleep(20)
+    connection.send_bits(socket, <<
+      begin:bits,
+      real_params:bits,
+      params_end:bits,
+      stdin_one:bits,
+    >>)
+  let assert Ok("AAA") = process.receive(signal, 1000)
   let assert Ok(_) = connection.send_bits(socket, stdin_two)
-  process.sleep(20)
+  let assert Ok("BBB") = process.receive(signal, 1000)
   let assert Ok(_) = connection.send_bits(socket, stdin_end)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   connection.close_socket(socket)
