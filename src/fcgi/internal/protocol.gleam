@@ -41,6 +41,7 @@ fn chunk_stdout_loop(
     return: list.reverse([Stdout(request_id, body), ..acc]),
   )
 
+  // Safe: the guard above ensures total > max_record_content_size.
   let assert Ok(head) = bit_array.slice(body, 0, max_record_content_size)
   let assert Ok(tail) =
     bit_array.slice(
