@@ -234,6 +234,7 @@ pub opaque type Builder(path) {
   Builder(
     handler: fn(Request(Body)) -> Response(ResponseData),
     path: Option(String),
+    socket_mode: Option(Int),
     max_body_size: Int,
     body_read_timeout_ms: Int,
   )
@@ -275,6 +276,17 @@ pub fn listen_path(builder: Builder(path), path: String) -> Builder(HasPath) {
   Builder(..builder, path: option.Some(path))
 }
 
+/// Set the Unix domain socket path and the file mode applied to it after
+/// `bind(2)`. `mode` is a Unix permission bitfield (e.g. `0o660`, `0o666`).
+/// `start` returns `ListenerError` if the chmod fails.
+pub fn listen_path_with_mode(
+  builder: Builder(path),
+  path: String,
+  mode: Int,
+) -> Builder(HasPath) {
+  Builder(..builder, path: option.Some(path), socket_mode: option.Some(mode))
+}
+
 /// Set the maximum body bytes the server will deliver to the handler in
 /// total across all `read_chunk` calls. Must be `>= 0`; `start` returns
 /// `InvalidMaxBodySize(bytes)` for negative values.
@@ -308,6 +320,7 @@ pub fn new(
   Builder(
     handler:,
     path: option.None,
+    socket_mode: option.None,
     max_body_size: default_max_body_size,
     body_read_timeout_ms: default_body_read_timeout_ms,
   )
@@ -329,6 +342,7 @@ pub fn start(
   let assert option.Some(path) = builder.path
   start_server(
     path,
+    builder.socket_mode,
     builder.max_body_size,
     builder.body_read_timeout_ms,
     wrap_handler(builder.handler),
@@ -362,11 +376,13 @@ fn to_response_data(public: ResponseData) -> connection.ResponseData {
 
 fn start_server(
   path: String,
+  socket_mode: Option(Int),
   max_body_size: Int,
   body_read_timeout_ms: Int,
   handler: Handler,
 ) -> Result(actor.Started(Supervisor), StartError) {
   use socket <- result.try(open_socket(path))
+  use _ <- result.try(apply_socket_mode(socket, path, socket_mode))
   let factory_name = process.new_name(prefix: "fcgi_server_factory")
   let builder =
     static_supervisor.new(static_supervisor.RestForOne)
@@ -426,6 +442,31 @@ fn open_socket(path: String) -> Result(connection.Socket, StartError) {
     Error(connection.PathExists(path)) -> Error(SocketPathExists(path))
     Error(error) ->
       Error(ListenerError("listen failed: " <> describe_transport_error(error)))
+  }
+}
+
+fn apply_socket_mode(
+  socket: connection.Socket,
+  path: String,
+  mode: Option(Int),
+) -> Result(Nil, StartError) {
+  case mode {
+    option.None -> Ok(Nil)
+    option.Some(value) -> chmod_socket_path(socket, path, value)
+  }
+}
+
+fn chmod_socket_path(
+  socket: connection.Socket,
+  path: String,
+  mode: Int,
+) -> Result(Nil, StartError) {
+  case connection.chmod_path(path, mode) {
+    Ok(Nil) -> Ok(Nil)
+    Error(error) -> {
+      cleanup_socket(socket, path)
+      Error(ListenerError("chmod failed: " <> describe_transport_error(error)))
+    }
   }
 }
 

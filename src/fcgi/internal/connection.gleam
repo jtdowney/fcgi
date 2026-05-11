@@ -45,6 +45,9 @@ pub type SocketError {
 @external(erlang, "fcgi_ffi", "accept")
 pub fn accept(listen: Socket) -> Result(Socket, SocketError)
 
+@external(erlang, "fcgi_ffi", "chmod_path")
+pub fn chmod_path(path: String, mode: Int) -> Result(Nil, SocketError)
+
 @external(erlang, "fcgi_ffi", "close_file")
 pub fn close_file(handle: Handle) -> Nil
 

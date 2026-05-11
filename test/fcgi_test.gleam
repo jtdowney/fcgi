@@ -757,6 +757,27 @@ pub fn read_chunk_returns_client_disconnected_when_peer_closes_test() {
   assert observed == "disconnected"
 }
 
+pub fn listen_path_with_mode_chmods_the_socket_test() {
+  use path <- helpers.with_temp_socket_path
+  let handler = fn(_req: Request(fcgi.Body)) {
+    response.new(200)
+    |> response.set_header("content-type", "text/plain")
+    |> response.set_body(fcgi.bytes(bytes_tree.from_string("ok")))
+  }
+
+  let assert Ok(started) =
+    handler
+    |> fcgi.new
+    |> fcgi.listen_path_with_mode(path, 0o660)
+    |> fcgi.start
+
+  let assert Ok(info) = simplifile.file_info(path)
+  let mode = simplifile.file_info_permissions_octal(info)
+  helpers.stop_supervisor(started)
+
+  assert mode == 0o660
+}
+
 pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
   use path <- helpers.with_temp_socket_path
   let handler = fn(_req: Request(fcgi.Body)) {

@@ -6,6 +6,7 @@
     open_and_size/1,
     sendfile/4,
     listen/1,
+    chmod_path/2,
     socket_close/1,
     accept/1,
     send/2,
@@ -73,6 +74,9 @@ listen(PathBin) ->
         {error, R} ->
             {error, {posix, R}}
     end.
+
+chmod_path(PathBin, Mode) ->
+    wrap_posix(file:change_mode(PathBin, Mode)).
 
 socket_close(Socket) ->
     _ = gen_tcp:close(Socket),
