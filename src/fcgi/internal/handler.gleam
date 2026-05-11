@@ -478,14 +478,11 @@ fn is_request_boundary(before: State, after_state: State) -> Bool {
   }
 }
 
-/// Informational values reported in response to FCGI_GET_VALUES. The server
-/// does not multiplex, so MAX_REQS mirrors MAX_CONNS. These are advertised
-/// as soft hints; upstream proxies should rely on their own pooling
-/// configuration as the authoritative cap.
+/// Informational values reported in response to FCGI_GET_VALUES. Only
+/// `FCGI_MPXS_CONNS` is answered; `FCGI_MAX_CONNS` and `FCGI_MAX_REQS`
+/// are omitted because the server enforces no internal cap.
 fn lookup_capability(name: String) -> Result(#(String, String), Nil) {
   case name {
-    "FCGI_MAX_CONNS" -> Ok(#(name, "100000"))
-    "FCGI_MAX_REQS" -> Ok(#(name, "100000"))
     "FCGI_MPXS_CONNS" -> Ok(#(name, "0"))
     _ -> Error(Nil)
   }

@@ -364,10 +364,10 @@ pub fn get_values_returns_capabilities_test() {
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
   let assert protocol.GetValuesResult(pairs) = record
   assert rest == <<>>
-  assert list.key_find(pairs, "FCGI_MAX_CONNS") == Ok("100000")
-  assert list.key_find(pairs, "FCGI_MAX_REQS") == Ok("100000")
+  assert list.key_find(pairs, "FCGI_MAX_CONNS") == Error(Nil)
+  assert list.key_find(pairs, "FCGI_MAX_REQS") == Error(Nil)
   assert list.key_find(pairs, "FCGI_MPXS_CONNS") == Ok("0")
-  assert list.length(pairs) == 3
+  assert list.length(pairs) == 1
   assert outcome.continuation == handler.WaitForMore
 }
 
@@ -629,7 +629,7 @@ pub fn terminators_arriving_in_separate_feeds_test() {
 }
 
 pub fn get_values_filters_unknown_names_test() {
-  let names = ["UNKNOWN", "FCGI_MAX_CONNS"]
+  let names = ["UNKNOWN", "FCGI_MPXS_CONNS"]
   let bytes = protocol.encode_incoming(protocol.GetValues(names:))
 
   let outcome =
@@ -642,8 +642,7 @@ pub fn get_values_filters_unknown_names_test() {
 
   let assert helpers.OutgoingParsed(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
-  assert record
-    == protocol.GetValuesResult(pairs: [#("FCGI_MAX_CONNS", "100000")])
+  assert record == protocol.GetValuesResult(pairs: [#("FCGI_MPXS_CONNS", "0")])
   assert rest == <<>>
 }
 
@@ -832,7 +831,7 @@ pub fn mismatched_abort_id_is_ignored_test() {
 
 pub fn get_values_followed_by_request_drains_buffered_records_test() {
   let get_values =
-    protocol.encode_incoming(protocol.GetValues(names: ["FCGI_MAX_CONNS"]))
+    protocol.encode_incoming(protocol.GetValues(names: ["FCGI_MPXS_CONNS"]))
   let request_bytes =
     helpers.request_stream_bytes(
       request_id: 7,
@@ -861,7 +860,7 @@ pub fn get_values_followed_by_request_drains_buffered_records_test() {
   let assert helpers.OutgoingParsed(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
   let assert protocol.GetValuesResult(pairs) = record
-  assert list.key_find(pairs, "FCGI_MAX_CONNS") == Ok("100000")
+  assert list.key_find(pairs, "FCGI_MPXS_CONNS") == Ok("0")
   assert rest == <<>>
 }
 
