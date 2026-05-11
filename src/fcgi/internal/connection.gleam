@@ -4,7 +4,6 @@ import fcgi/internal/protocol
 import gleam/bit_array
 import gleam/bool
 import gleam/bytes_tree.{type BytesTree}
-import gleam/dict.{type Dict}
 import gleam/erlang/atom.{type Atom}
 import gleam/erlang/process
 import gleam/http
@@ -26,6 +25,67 @@ const file_chunk_size = 65_535
 const init_recv_timeout_ms = 60_000
 
 const max_params_size = 65_536
+
+pub type FileError {
+  NotFound
+  AccessDenied
+  IsDirectory
+  Unknown(reason: String)
+}
+
+pub type Handle
+
+pub type Socket
+
+pub type SocketError {
+  PathExists(path: String)
+  Posix(reason: Atom)
+}
+
+@external(erlang, "fcgi_ffi", "accept")
+pub fn accept(listen: Socket) -> Result(Socket, SocketError)
+
+@external(erlang, "fcgi_ffi", "close_file")
+pub fn close_file(handle: Handle) -> Nil
+
+@external(erlang, "fcgi_ffi", "socket_close")
+pub fn close_socket(socket: Socket) -> Nil
+
+@external(erlang, "fcgi_ffi", "controlling_process")
+pub fn controlling_process(
+  socket: Socket,
+  pid: process.Pid,
+) -> Result(Nil, SocketError)
+
+@external(erlang, "fcgi_ffi", "delete_path")
+pub fn delete_path(path: String) -> Nil
+
+@external(erlang, "fcgi_ffi", "listen")
+pub fn listen(path: String) -> Result(Socket, SocketError)
+
+@external(erlang, "fcgi_ffi", "open_and_size")
+pub fn open_and_size(path: String) -> Result(#(Handle, Int), FileError)
+
+@external(erlang, "fcgi_ffi", "recv")
+pub fn recv(
+  socket: Socket,
+  size: Int,
+  timeout_ms: Int,
+) -> Result(BitArray, SocketError)
+
+@external(erlang, "fcgi_ffi", "send")
+pub fn send_bits(socket: Socket, data: BitArray) -> Result(Nil, SocketError)
+
+@external(erlang, "fcgi_ffi", "send")
+fn send_tree(socket: Socket, data: BytesTree) -> Result(Nil, SocketError)
+
+@external(erlang, "fcgi_ffi", "sendfile")
+fn sendfile(
+  handle: Handle,
+  socket: Socket,
+  offset: Int,
+  bytes: Int,
+) -> Result(Int, FileError)
 
 pub type BodyRead {
   BodyMore(data: BitArray, next: BodyReader)
@@ -69,7 +129,7 @@ type BodyContext {
     overflowed: Bool,
     max_body_size: Int,
     timeout_ms: Int,
-    tracker: process.Subject(StateSnapshot),
+    finalization: Finalization,
   )
 }
 
@@ -86,6 +146,15 @@ type FeedOutcome {
 
 type StateSnapshot {
   StateSnapshot(state: handler.State, finished: Bool, overflowed: Bool)
+}
+
+type Finalization {
+  Finalized
+  PendingDrain(tracker: process.Subject(StateSnapshot))
+}
+
+type InitialReader {
+  InitialReader(reader: BodyReader, finalization: Finalization)
 }
 
 pub fn send_chunk(sender: StreamSender, data: BitArray) -> Result(Nil, Nil) {
@@ -270,49 +339,63 @@ fn feed_until_request_or_end(
 
 fn finalize_request(
   spec: Spec,
-  tracker: process.Subject(StateSnapshot),
+  finalization: Finalization,
+  final_state: handler.State,
 ) -> Result(handler.State, Nil) {
-  use initial <- result.try(
-    process.receive(tracker, 0)
-    |> result.replace_error(Nil),
-  )
-  let final = drain_tracker_loop(tracker, initial)
-  drain_body_loop(spec, final)
+  case finalization {
+    Finalized -> Ok(final_state)
+    PendingDrain(subject) -> {
+      use initial <- result.try(
+        process.receive(subject, 0)
+        |> result.replace_error(Nil),
+      )
+      let final = drain_tracker_loop(subject, initial)
+      drain_body_loop(spec, final)
+    }
+  }
 }
 
 fn handle_one_request(
   spec: Spec,
-  tracker: process.Subject(StateSnapshot),
   fsm_state: handler.State,
   request_id: Int,
   params: BitArray,
   body_queue: List(handler.Event),
-) -> Result(Nil, Nil) {
+) -> Result(Finalization, Nil) {
   use <- bool.lazy_guard(
     when: list.contains(body_queue, handler.BodyTooLarge),
-    return: fn() { send_overloaded(spec.socket, request_id) },
+    return: fn() {
+      let _ = send_overloaded(spec.socket, request_id)
+      Error(Nil)
+    },
   )
-  case build_request(params) {
+  case parse_params(params) {
     Error(message) -> {
       let response = error_response(400, message)
       send_response(spec.socket, request_id, response)
+      |> result.map(fn(_) { Finalized })
     }
     Ok(req) -> {
-      let reader = make_initial_reader(spec, tracker, fsm_state, body_queue)
+      let InitialReader(reader, finalization) =
+        make_initial_reader(spec, fsm_state, body_queue)
       let response = run_user_handler(spec.handler, req, reader)
       send_response(spec.socket, request_id, response)
+      |> result.map(fn(_) { finalization })
     }
   }
 }
 
 fn make_initial_reader(
   spec: Spec,
-  tracker: process.Subject(StateSnapshot),
   state: handler.State,
   body_queue: List(handler.Event),
-) -> BodyReader {
+) -> InitialReader {
   let #(initial_data, initial_done, initial_overflow) =
     collect_body_events(body_queue, <<>>, False, False)
+  let finalization = case initial_done || initial_overflow {
+    True -> Finalized
+    False -> PendingDrain(process.new_subject())
+  }
   let ctx =
     BodyContext(
       socket: spec.socket,
@@ -322,10 +405,10 @@ fn make_initial_reader(
       overflowed: initial_overflow,
       max_body_size: spec.max_body_size,
       timeout_ms: spec.body_read_timeout_ms,
-      tracker:,
+      finalization:,
     )
   put_snapshot(ctx)
-  reader_for(ctx)
+  InitialReader(reader: reader_for(ctx), finalization:)
 }
 
 fn pull_more(ctx: BodyContext) -> Result(BodyRead, BodyReadError) {
@@ -358,14 +441,18 @@ fn pull_more(ctx: BodyContext) -> Result(BodyRead, BodyReadError) {
 }
 
 fn put_snapshot(ctx: BodyContext) -> Nil {
-  process.send(
-    ctx.tracker,
-    StateSnapshot(
-      state: ctx.state,
-      finished: ctx.finished,
-      overflowed: ctx.overflowed,
-    ),
-  )
+  case ctx.finalization {
+    Finalized -> Nil
+    PendingDrain(subject) ->
+      process.send(
+        subject,
+        StateSnapshot(
+          state: ctx.state,
+          finished: ctx.finished,
+          overflowed: ctx.overflowed,
+        ),
+      )
+  }
 }
 
 fn read_step(ctx: BodyContext) -> Result(BodyRead, BodyReadError) {
@@ -392,24 +479,16 @@ fn run_connection_loop(
   state: handler.State,
   pending: BitArray,
 ) -> Nil {
-  let tracker = process.new_subject()
   case feed_until_request_or_end(spec, state, pending) {
     FeedReachedEnd -> Nil
     FeedReachedRequest(fsm_state, request_id, params, body_queue, keep_conn) -> {
       let send_result =
-        handle_one_request(
-          spec,
-          tracker,
-          fsm_state,
-          request_id,
-          params,
-          body_queue,
-        )
+        handle_one_request(spec, fsm_state, request_id, params, body_queue)
       case send_result, keep_conn {
         Error(_), _ -> Nil
         Ok(_), False -> Nil
-        Ok(_), True ->
-          case finalize_request(spec, tracker) {
+        Ok(finalization), True ->
+          case finalize_request(spec, finalization, fsm_state) {
             Error(_) -> Nil
             Ok(next_state) -> run_connection_loop(spec, next_state, <<>>)
           }
@@ -473,10 +552,7 @@ fn send_response(
   case response.body {
     Bytes(data) -> {
       let body = handler.encode_stdout_chunk(request_id, data)
-      let combined =
-        header
-        |> bytes_tree.append_tree(body)
-        |> bytes_tree.append_tree(terminator)
+      let combined = bytes_tree.concat([header, body, terminator])
       send_if_nonempty(socket, combined)
       |> result.replace_error(Nil)
     }
@@ -551,75 +627,126 @@ fn stream_sender(socket: Socket, request_id: Int) -> StreamSender {
 pub type RequestError {
   MissingMethod
   InvalidMethod(method: String)
+  InvalidContentLength(value: String)
+}
+
+type Env {
+  Env(
+    method: Option(String),
+    https: Option(String),
+    server_name: Option(String),
+    server_port_raw: Option(String),
+    http_host: Option(String),
+    path: Option(String),
+    query: Option(String),
+    content_length_raw: Option(String),
+    headers: List(#(String, String)),
+  )
 }
 
 pub fn to_http_request(
-  env: Dict(String, String),
+  pairs: List(#(String, String)),
   body: body,
 ) -> Result(Request(body), RequestError) {
-  use method_str <- result.try(
-    dict.get(env, "REQUEST_METHOD")
-    |> result.replace_error(MissingMethod),
+  collect_env(pairs)
+  |> env_to_request(body)
+}
+
+fn parse_params(params: BitArray) -> Result(Request(Nil), String) {
+  case protocol.parse_name_value_pairs(params) {
+    Error(_) -> Error("malformed FastCGI parameters")
+    Ok(pairs) ->
+      to_http_request(pairs, Nil)
+      |> result.map_error(request_error_message)
+  }
+}
+
+fn empty_env() -> Env {
+  Env(
+    method: option.None,
+    https: option.None,
+    server_name: option.None,
+    server_port_raw: option.None,
+    http_host: option.None,
+    path: option.None,
+    query: option.None,
+    content_length_raw: option.None,
+    headers: [],
   )
+}
+
+fn absorb_pair(env: Env, key: String, value: String) -> Env {
+  case key {
+    "REQUEST_METHOD" -> Env(..env, method: option.Some(value))
+    "HTTPS" -> Env(..env, https: option.Some(value))
+    "SERVER_NAME" -> Env(..env, server_name: option.Some(value))
+    "SERVER_PORT" -> Env(..env, server_port_raw: option.Some(value))
+    "HTTP_HOST" -> Env(..env, http_host: option.Some(value))
+    "PATH_INFO" -> Env(..env, path: option.Some(value))
+    "QUERY_STRING" -> Env(..env, query: option.Some(value))
+    "CONTENT_TYPE" ->
+      Env(..env, headers: [#("content-type", value), ..env.headers])
+    "CONTENT_LENGTH" ->
+      Env(..env, content_length_raw: option.Some(value), headers: [
+        #("content-length", value),
+        ..env.headers
+      ])
+    "HTTP_" <> name ->
+      Env(..env, headers: [
+        #(string.replace(string.lowercase(name), "_", "-"), value),
+        ..env.headers
+      ])
+    _ -> env
+  }
+}
+
+fn collect_env(pairs: List(#(String, String))) -> Env {
+  list.fold(pairs, empty_env(), fn(env, pair) {
+    absorb_pair(env, pair.0, pair.1)
+  })
+}
+
+fn env_to_request(env: Env, body: body) -> Result(Request(body), RequestError) {
+  use method_str <- result.try(option.to_result(env.method, MissingMethod))
   use method <- result.try(
     http.parse_method(method_str)
     |> result.replace_error(InvalidMethod(method_str)),
   )
-
-  let scheme = case dict.get(env, "HTTPS") {
-    Ok(value) -> https_scheme_from_value(value)
-    Error(_) -> http.Http
+  use _ <- result.try(validate_content_length(env.content_length_raw))
+  let scheme = case env.https {
+    option.Some(value) -> https_scheme_from_value(value)
+    option.None -> http.Http
   }
-
-  let server_name = result.unwrap(dict.get(env, "SERVER_NAME"), "localhost")
+  let server_name = option.unwrap(env.server_name, "localhost")
   let server_port =
-    dict.get(env, "SERVER_PORT")
-    |> result.try(int.parse)
-    |> option.from_result
-  let #(host, port) = case dict.get(env, "HTTP_HOST") {
-    Ok(raw) -> resolve_http_host(raw, server_name, server_port)
-    Error(_) -> #(server_name, server_port)
+    option.then(env.server_port_raw, fn(raw) {
+      int.parse(raw)
+      |> option.from_result
+    })
+  let #(host, port) = case env.http_host {
+    option.Some(raw) -> resolve_http_host(raw, server_name, server_port)
+    option.None -> #(server_name, server_port)
   }
-  let path = result.unwrap(dict.get(env, "PATH_INFO"), "/")
-  let query =
-    dict.get(env, "QUERY_STRING")
-    |> option.from_result
-  let headers =
-    env
-    |> dict.to_list
-    |> list.filter_map(map_header)
-
+  let path = option.unwrap(env.path, "/")
   Ok(request.Request(
     method:,
-    headers:,
+    headers: env.headers,
     body:,
     scheme:,
     host:,
     port:,
     path:,
-    query:,
+    query: env.query,
   ))
 }
 
-fn build_request(params_bytes: BitArray) -> Result(Request(Nil), String) {
-  use pairs <- result.try(
-    protocol.parse_name_value_pairs(params_bytes)
-    |> result.replace_error("malformed FastCGI parameters"),
-  )
-  let env = dict.from_list(pairs)
-  use _ <- result.try(check_content_length(env))
-  to_http_request(env, Nil)
-  |> result.map_error(request_error_message)
-}
-
-fn check_content_length(env: Dict(String, String)) -> Result(Nil, String) {
-  case dict.get(env, "CONTENT_LENGTH") {
-    Error(_) -> Ok(Nil)
-    Ok("") -> Ok(Nil)
-    Ok(raw) ->
-      case int.parse(raw) {
-        Error(_) -> Error("invalid CONTENT_LENGTH: " <> raw)
-        Ok(declared) if declared < 0 -> Error("invalid CONTENT_LENGTH: " <> raw)
+fn validate_content_length(raw: Option(String)) -> Result(Nil, RequestError) {
+  case raw {
+    option.None | option.Some("") -> Ok(Nil)
+    option.Some(value) ->
+      case int.parse(value) {
+        Error(_) -> Error(InvalidContentLength(value))
+        Ok(declared) if declared < 0 -> Error(InvalidContentLength(value))
         Ok(_) -> Ok(Nil)
       }
   }
@@ -632,21 +759,11 @@ fn https_scheme_from_value(value: String) -> http.Scheme {
   }
 }
 
-fn map_header(pair: #(String, String)) -> Result(#(String, String), Nil) {
-  let #(key, value) = pair
-  case key {
-    "CONTENT_TYPE" -> Ok(#("content-type", value))
-    "CONTENT_LENGTH" -> Ok(#("content-length", value))
-    "HTTP_" <> name ->
-      Ok(#(string.replace(string.lowercase(name), "_", "-"), value))
-    _ -> Error(Nil)
-  }
-}
-
 fn request_error_message(error: RequestError) -> String {
   case error {
     MissingMethod -> "missing REQUEST_METHOD parameter"
     InvalidMethod(method) -> "invalid REQUEST_METHOD: " <> method
+    InvalidContentLength(value) -> "invalid CONTENT_LENGTH: " <> value
   }
 }
 
@@ -688,64 +805,3 @@ fn resolve_unbracketed_host(
     _ -> #(raw, server_port)
   }
 }
-
-pub type FileError {
-  NotFound
-  AccessDenied
-  IsDirectory
-  Unknown(reason: String)
-}
-
-pub type Handle
-
-pub type Socket
-
-pub type SocketError {
-  PathExists(path: String)
-  Posix(reason: Atom)
-}
-
-@external(erlang, "fcgi_ffi", "accept")
-pub fn accept(listen: Socket) -> Result(Socket, SocketError)
-
-@external(erlang, "fcgi_ffi", "close_file")
-pub fn close_file(handle: Handle) -> Nil
-
-@external(erlang, "fcgi_ffi", "socket_close")
-pub fn close_socket(socket: Socket) -> Nil
-
-@external(erlang, "fcgi_ffi", "controlling_process")
-pub fn controlling_process(
-  socket: Socket,
-  pid: process.Pid,
-) -> Result(Nil, SocketError)
-
-@external(erlang, "fcgi_ffi", "delete_path")
-pub fn delete_path(path: String) -> Nil
-
-@external(erlang, "fcgi_ffi", "listen")
-pub fn listen(path: String) -> Result(Socket, SocketError)
-
-@external(erlang, "fcgi_ffi", "open_and_size")
-pub fn open_and_size(path: String) -> Result(#(Handle, Int), FileError)
-
-@external(erlang, "fcgi_ffi", "recv")
-pub fn recv(
-  socket: Socket,
-  size: Int,
-  timeout_ms: Int,
-) -> Result(BitArray, SocketError)
-
-@external(erlang, "fcgi_ffi", "send")
-pub fn send_bits(socket: Socket, data: BitArray) -> Result(Nil, SocketError)
-
-@external(erlang, "fcgi_ffi", "send")
-fn send_tree(socket: Socket, data: BytesTree) -> Result(Nil, SocketError)
-
-@external(erlang, "fcgi_ffi", "sendfile")
-fn sendfile(
-  handle: Handle,
-  socket: Socket,
-  offset: Int,
-  bytes: Int,
-) -> Result(Int, FileError)

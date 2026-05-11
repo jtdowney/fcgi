@@ -20,18 +20,26 @@ pub fn encode_response_header(
   request_id: Int,
   resp: Response(body),
 ) -> BytesTree {
-  let header_block = render_header_block(resp)
-  encode_stdout_chunk(request_id, bytes_tree.from_string(header_block))
+  encode_stdout_chunk(request_id, render_header_block(resp))
 }
 
-fn render_header_block(resp: Response(anything)) -> String {
-  let status_line = "Status: " <> int.to_string(resp.status) <> "\r\n"
-  let headers =
-    resp.headers
-    |> list.filter(fn(h) { is_safe_header(h.0, h.1) })
-    |> list.map(fn(h) { h.0 <> ": " <> h.1 <> "\r\n" })
-    |> string.concat
-  status_line <> headers <> "\r\n"
+fn render_header_block(resp: Response(anything)) -> BytesTree {
+  let start =
+    bytes_tree.from_string("Status: " <> int.to_string(resp.status) <> "\r\n")
+  let with_headers =
+    list.fold(resp.headers, start, fn(acc, header) {
+      let #(name, value) = header
+      case is_safe_header(name, value) {
+        True ->
+          acc
+          |> bytes_tree.append_string(name)
+          |> bytes_tree.append_string(": ")
+          |> bytes_tree.append_string(value)
+          |> bytes_tree.append_string("\r\n")
+        False -> acc
+      }
+    })
+  bytes_tree.append_string(with_headers, "\r\n")
 }
 
 fn is_safe_header(name: String, value: String) -> Bool {

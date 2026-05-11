@@ -243,22 +243,37 @@ pub fn parse_record(buffer: BitArray) -> ParseResult {
       padding_length:size(8),
       _reserved:size(8),
       rest:bits,
-    >> -> {
-      use <- bool.guard(
-        when: version != supported_version,
-        return: ParseError(UnsupportedVersion(version)),
+    >> ->
+      parse_after_header(
+        version,
+        record_type,
+        id,
+        content_length,
+        padding_length,
+        rest,
       )
-      let total = content_length + padding_length
-      use <- bool.guard(
-        when: bit_array.byte_size(rest) < total,
-        return: NeedMore,
-      )
+    _ -> NeedMore
+  }
+}
 
-      let trailer_length = bit_array.byte_size(rest) - total
-      let assert Ok(body) = bit_array.slice(rest, 0, content_length)
-      let assert Ok(remaining) = bit_array.slice(rest, total, trailer_length)
-      parse_body(record_type, id, body, remaining)
-    }
+fn parse_after_header(
+  version: Int,
+  record_type: Int,
+  id: Int,
+  content_length: Int,
+  padding_length: Int,
+  rest: BitArray,
+) -> ParseResult {
+  use <- bool.guard(
+    when: version != supported_version,
+    return: ParseError(UnsupportedVersion(version)),
+  )
+  case rest {
+    <<
+      body:bytes-size(content_length),
+      _:bytes-size(padding_length),
+      remaining:bits,
+    >> -> parse_body(record_type, id, body, remaining)
     _ -> NeedMore
   }
 }
