@@ -29,7 +29,26 @@ pub fn maps_all_recognised_params_test() {
   assert request.get_header(req, "content-length") == Ok("17")
   assert request.get_header(req, "user-agent") == Ok("curl/8.0")
   assert request.get_header(req, "x-forwarded-for") == Ok("10.0.0.1")
-  assert request.get_header(req, "document-root") == Error(Nil)
+  assert request.get_header(req, "cgi-document-root") == Ok("/var/www")
+}
+
+pub fn unknown_cgi_vars_pass_through_as_cgi_headers_test() {
+  let p = [
+    #("REQUEST_METHOD", "GET"),
+    #("REMOTE_ADDR", "203.0.113.7"),
+    #("REMOTE_PORT", "54321"),
+    #("SCRIPT_NAME", "/app"),
+    #("REQUEST_URI", "/app/things/42?x=1"),
+    #("SERVER_PROTOCOL", "HTTP/1.1"),
+    #("SSL_CLIENT_S_DN", "CN=client"),
+  ]
+  let assert Ok(req) = connection.to_http_request(p, "")
+  assert request.get_header(req, "cgi-remote-addr") == Ok("203.0.113.7")
+  assert request.get_header(req, "cgi-remote-port") == Ok("54321")
+  assert request.get_header(req, "cgi-script-name") == Ok("/app")
+  assert request.get_header(req, "cgi-request-uri") == Ok("/app/things/42?x=1")
+  assert request.get_header(req, "cgi-server-protocol") == Ok("HTTP/1.1")
+  assert request.get_header(req, "cgi-ssl-client-s-dn") == Ok("CN=client")
 }
 
 pub fn defaults_when_optional_params_missing_test() {

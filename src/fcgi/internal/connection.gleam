@@ -696,7 +696,11 @@ fn absorb_pair(env: Env, key: String, value: String) -> Env {
         #(string.replace(string.lowercase(name), "_", "-"), value),
         ..env.headers
       ])
-    _ -> env
+    _ ->
+      Env(..env, headers: [
+        #("cgi-" <> string.replace(string.lowercase(key), "_", "-"), value),
+        ..env.headers
+      ])
   }
 }
 

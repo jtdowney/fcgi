@@ -1,6 +1,19 @@
 //// FastCGI Responder server. Build a server with `new`, configure it with
 //// `listen_path` and `max_body_size`, then call `supervised` to add it to
 //// an OTP supervision tree, or `start` to run it directly.
+////
+//// CGI parameters from the upstream proxy are surfaced on the handler's
+//// `Request` as follows:
+////
+//// - `REQUEST_METHOD`, `HTTPS`, `SERVER_NAME` / `SERVER_PORT` (or
+////   `HTTP_HOST`), `PATH_INFO`, and `QUERY_STRING` populate the matching
+////   `Request` fields.
+//// - `CONTENT_TYPE` and `CONTENT_LENGTH` become the `content-type` and
+////   `content-length` headers.
+//// - `HTTP_*` variables become lowercased headers with underscores
+////   replaced by dashes (e.g. `HTTP_X_FORWARDED_FOR` → `x-forwarded-for`).
+//// - Every other variable is exposed as a `cgi-*` header (e.g.
+////   `REMOTE_ADDR` → `cgi-remote-addr`, `SCRIPT_NAME` → `cgi-script-name`).
 
 import fcgi/internal/connection
 import gleam/bool
