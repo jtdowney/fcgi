@@ -32,7 +32,10 @@ pub fn main() -> Nil {
   process.sleep_forever()
 }
 
-fn handle_request(req: Request(fcgi.Body)) -> Response(fcgi.ResponseData) {
+fn handle_request(
+  req: Request(fcgi.BodyReader),
+  _ctx: fcgi.Context,
+) -> Response(fcgi.ResponseData) {
   case request.path_segments(req) {
     [] -> serve_static_file("static/index.html", "text/html; charset=utf-8")
     ["static", "app.js"] ->

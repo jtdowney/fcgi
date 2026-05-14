@@ -20,10 +20,46 @@ pub fn encode_response_header(
   request_id: Int,
   resp: Response(body),
 ) -> BytesTree {
-  encode_stdout_chunk(request_id, render_header_block(resp))
+  encode_stdout_chunk(request_id, encode_headers(resp))
 }
 
-fn render_header_block(resp: Response(anything)) -> BytesTree {
+pub fn encode_response_terminator(request_id: Int) -> BytesTree {
+  let terminator = protocol.Stdout(request_id, <<>>)
+  let end =
+    protocol.EndRequest(
+      request_id:,
+      app_status: 0,
+      protocol_status: protocol.RequestComplete,
+    )
+  encode_records([terminator, end])
+}
+
+pub fn encode_stdout_chunk(request_id: Int, payload: BytesTree) -> BytesTree {
+  use <- bool.guard(
+    when: bytes_tree.byte_size(payload) == 0,
+    return: bytes_tree.new(),
+  )
+  encode_records(protocol.chunk_stdout(
+    request_id,
+    bytes_tree.to_bit_array(payload),
+  ))
+}
+
+fn contains_crlf(value: String) -> Bool {
+  string.contains(value, "\r") || string.contains(value, "\n")
+}
+
+fn encode_records(records: List(protocol.Outgoing)) -> BytesTree {
+  list.fold(records, bytes_tree.new(), fn(acc, record) {
+    bytes_tree.append_tree(acc, protocol.encode_record(record))
+  })
+}
+
+fn is_safe_header(name: String, value: String) -> Bool {
+  !contains_crlf(name) && !contains_crlf(value)
+}
+
+fn encode_headers(resp: Response(anything)) -> BytesTree {
   let start =
     bytes_tree.from_string("Status: " <> int.to_string(resp.status) <> "\r\n")
   let with_headers =
@@ -40,45 +76,6 @@ fn render_header_block(resp: Response(anything)) -> BytesTree {
       }
     })
   bytes_tree.append_string(with_headers, "\r\n")
-}
-
-fn is_safe_header(name: String, value: String) -> Bool {
-  !contains_crlf(name) && !contains_crlf(value)
-}
-
-fn contains_crlf(value: String) -> Bool {
-  string.contains(value, "\r") || string.contains(value, "\n")
-}
-
-pub fn encode_response_terminator(request_id: Int) -> BytesTree {
-  let terminator = protocol.Stdout(request_id, <<>>)
-  let end =
-    protocol.EndRequest(
-      request_id:,
-      app_status: 0,
-      protocol_status: protocol.RequestComplete,
-    )
-  encode_records([terminator, end])
-}
-
-fn encode_records(records: List(protocol.Outgoing)) -> BytesTree {
-  list.fold(records, bytes_tree.new(), fn(acc, record) {
-    bytes_tree.append_tree(acc, protocol.encode_record(record))
-  })
-}
-
-pub fn encode_stdout_chunk(request_id: Int, payload: BytesTree) -> BytesTree {
-  let size = bytes_tree.byte_size(payload)
-  use <- bool.guard(when: size == 0, return: bytes_tree.new())
-  use <- bool.guard(
-    when: size <= protocol.max_record_content_size,
-    return: protocol.encode_stdout(request_id, payload),
-  )
-
-  encode_records(protocol.chunk_stdout(
-    request_id,
-    bytes_tree.to_bit_array(payload),
-  ))
 }
 
 pub type Continuation {
@@ -107,9 +104,7 @@ pub type PartialRequest {
     request_id: Int,
     keep_conn: Bool,
     params: BitArray,
-    params_done: Bool,
     started: Bool,
-    pre_start_stdin: BitArray,
     stdin_received: Int,
     stdin_done: Bool,
     body_overflowed: Bool,
@@ -122,8 +117,8 @@ pub type State {
   Receiving(buffer: BitArray, partial: PartialRequest)
 }
 
-type Step {
-  Step(
+type Action {
+  Action(
     state: State,
     outgoing: BytesTree,
     events: List(Event),
@@ -131,274 +126,20 @@ type Step {
   )
 }
 
-pub fn feed(
+pub fn step(
   state: State,
   bytes bytes: BitArray,
   max_body_size max_body_size: Int,
-  max_params_size max_params_size: Int,
 ) -> Outcome {
   let combined = with_buffer(state, <<state.buffer:bits, bytes:bits>>)
-  feed_loop(combined, bytes_tree.new(), [], max_body_size, max_params_size)
+  step_loop(combined, bytes_tree.new(), [], max_body_size)
 }
 
-fn apply_abort(partial: PartialRequest) -> Step {
-  let reply =
-    protocol.encode_record(protocol.EndRequest(
-      request_id: partial.request_id,
-      app_status: 0,
-      protocol_status: protocol.RequestComplete,
-    ))
-  Step(
-    state: Idle(<<>>),
-    outgoing: reply,
-    events: [],
-    terminate: option.Some(CloseConnection),
-  )
-}
-
-fn apply_begin_request_busy(
-  buffer: BitArray,
-  partial: PartialRequest,
-  id: Int,
-) -> Step {
-  let reply =
-    protocol.encode_record(protocol.EndRequest(
-      request_id: id,
-      app_status: 0,
-      protocol_status: protocol.CantMultiplexConnection,
-    ))
-  Step(
-    state: Receiving(buffer, partial),
-    outgoing: reply,
-    events: [],
-    terminate: option.None,
-  )
-}
-
-fn apply_begin_request_idle(
-  buffer: BitArray,
-  id: Int,
-  role: Int,
-  keep: Bool,
-) -> Step {
-  case role == protocol.responder_role {
-    True -> {
-      let partial =
-        PartialRequest(
-          request_id: id,
-          keep_conn: keep,
-          params: <<>>,
-          params_done: False,
-          started: False,
-          pre_start_stdin: <<>>,
-          stdin_received: 0,
-          stdin_done: False,
-          body_overflowed: False,
-          params_overflowed: False,
-        )
-      step(Receiving(buffer, partial))
-    }
-    False -> {
-      let reply =
-        protocol.encode_record(protocol.EndRequest(
-          request_id: id,
-          app_status: 0,
-          protocol_status: protocol.UnknownRole,
-        ))
-      Step(
-        state: Idle(buffer),
-        outgoing: reply,
-        events: [],
-        terminate: option.Some(CloseConnection),
-      )
-    }
-  }
-}
-
-fn apply_get_values(state: State, names: List(String)) -> Step {
-  let pairs = list.filter_map(names, lookup_capability)
-  let reply = protocol.encode_record(protocol.GetValuesResult(pairs:))
-  Step(state:, outgoing: reply, events: [], terminate: option.None)
-}
-
-fn apply_params(
-  buffer: BitArray,
-  partial: PartialRequest,
-  data: BitArray,
-  max_params_size: Int,
-) -> Step {
-  case bit_array.byte_size(data) {
-    0 -> finish_params(buffer, partial)
-    _ -> {
-      let #(params, overflow) =
-        merge_input(
-          partial.params,
-          partial.params_overflowed,
-          data,
-          max_params_size,
-        )
-      let updated =
-        PartialRequest(..partial, params:, params_overflowed: overflow)
-      step(Receiving(buffer, updated))
-    }
-  }
-}
-
-fn apply_record(
-  state: State,
-  record: protocol.Incoming,
-  max_body_size: Int,
-  max_params_size: Int,
-) -> Step {
-  case state, record {
-    _, protocol.BeginRequest(0, _, _) ->
-      Step(
-        state:,
-        outgoing: bytes_tree.new(),
-        events: [],
-        terminate: option.Some(CloseConnection),
-      )
-    Idle(buffer), protocol.BeginRequest(id, role, keep) ->
-      apply_begin_request_idle(buffer, id, role, keep)
-    Receiving(buffer, partial), protocol.BeginRequest(id, _, _) ->
-      apply_begin_request_busy(buffer, partial, id)
-    Receiving(buffer, partial), protocol.Params(id, data)
-      if id == partial.request_id
-    -> apply_params(buffer, partial, data, max_params_size)
-    Receiving(buffer, partial), protocol.Stdin(id, data)
-      if id == partial.request_id
-    -> apply_stdin(buffer, partial, data, max_body_size)
-    Receiving(_, partial), protocol.AbortRequest(id)
-      if id == partial.request_id
-    -> apply_abort(partial)
-    _, protocol.GetValues(names) -> apply_get_values(state, names)
-    _, protocol.IncomingUnknown(id, type_byte) ->
-      apply_unknown_type_record(state, id, type_byte)
-    _, _ -> step(state)
-  }
-}
-
-fn apply_stdin(
-  buffer: BitArray,
-  partial: PartialRequest,
-  data: BitArray,
-  max_body_size: Int,
-) -> Step {
-  case bit_array.byte_size(data) {
-    0 -> finish_stdin(buffer, partial)
-    _ -> apply_stdin_chunk(buffer, partial, data, max_body_size)
-  }
-}
-
-fn apply_stdin_chunk(
-  buffer: BitArray,
-  partial: PartialRequest,
-  data: BitArray,
-  max_body_size: Int,
-) -> Step {
-  use <- bool.guard(
-    when: partial.body_overflowed,
-    return: step(Receiving(buffer, partial)),
-  )
-  let new_total = partial.stdin_received + bit_array.byte_size(data)
-  case new_total > max_body_size {
-    True -> apply_stdin_overflow(buffer, partial)
-    False -> apply_stdin_in_bounds(buffer, partial, data, new_total)
-  }
-}
-
-fn apply_stdin_in_bounds(
-  buffer: BitArray,
-  partial: PartialRequest,
-  data: BitArray,
-  new_total: Int,
-) -> Step {
-  case partial.started {
-    True -> {
-      let updated = PartialRequest(..partial, stdin_received: new_total)
-      Step(
-        state: Receiving(buffer, updated),
-        outgoing: bytes_tree.new(),
-        events: [BodyChunk(data)],
-        terminate: option.None,
-      )
-    }
-    False -> {
-      let combined = <<partial.pre_start_stdin:bits, data:bits>>
-      let updated =
-        PartialRequest(
-          ..partial,
-          pre_start_stdin: combined,
-          stdin_received: new_total,
-        )
-      step(Receiving(buffer, updated))
-    }
-  }
-}
-
-fn apply_stdin_overflow(buffer: BitArray, partial: PartialRequest) -> Step {
-  let updated =
-    PartialRequest(..partial, body_overflowed: True, pre_start_stdin: <<>>)
-  case partial.started {
-    True ->
-      Step(
-        state: Receiving(buffer, updated),
-        outgoing: bytes_tree.new(),
-        events: [BodyTooLarge],
-        terminate: option.None,
-      )
-    False -> overloaded_end(buffer, partial)
-  }
-}
-
-fn apply_unknown_type_record(
-  state: State,
-  request_id: Int,
-  type_byte: Int,
-) -> Step {
-  case request_id {
-    0 -> {
-      let reply = protocol.encode_record(protocol.UnknownType(type_byte:))
-      Step(state:, outgoing: reply, events: [], terminate: option.None)
-    }
-    _ -> step(state)
-  }
-}
-
-fn emit_start(buffer: BitArray, partial: PartialRequest) -> Step {
-  let started = PartialRequest(..partial, started: True, pre_start_stdin: <<>>)
-  let start_event =
-    Start(
-      request_id: partial.request_id,
-      params: partial.params,
-      keep_conn: partial.keep_conn,
-    )
-  let body_events = case bit_array.byte_size(partial.pre_start_stdin) {
-    0 -> []
-    _ -> [BodyChunk(partial.pre_start_stdin)]
-  }
-  let events = case partial.stdin_done {
-    True -> [start_event, ..list.append(body_events, [BodyEnd])]
-    False -> [start_event, ..body_events]
-  }
-  let next_state = case partial.stdin_done {
-    True -> Idle(buffer)
-    False -> Receiving(buffer, started)
-  }
-  Step(
-    state: next_state,
-    outgoing: bytes_tree.new(),
-    events:,
-    terminate: option.None,
-  )
-}
-
-fn feed_loop(
+fn step_loop(
   state: State,
   outgoing: BytesTree,
   events_rev: List(Event),
   max_body_size: Int,
-  max_params_size: Int,
 ) -> Outcome {
   case protocol.parse_record(state.buffer) {
     protocol.NeedMore ->
@@ -416,12 +157,12 @@ fn feed_loop(
         continuation: CloseConnection,
       )
     protocol.Parsed(record, rest) -> {
-      let step = apply_record(state, record, max_body_size, max_params_size)
-      let advanced = with_buffer(step.state, rest)
-      let combined_outgoing = bytes_tree.append_tree(outgoing, step.outgoing)
+      let action = handle_record(state, record, max_body_size)
+      let advanced = with_buffer(action.state, rest)
+      let combined_outgoing = bytes_tree.append_tree(outgoing, action.outgoing)
       let combined_events =
-        list.fold(step.events, events_rev, fn(acc, evt) { [evt, ..acc] })
-      case step.terminate, is_request_boundary(state, step.state) {
+        list.fold(action.events, events_rev, fn(acc, evt) { [evt, ..acc] })
+      case action.terminate, is_request_boundary(state, action.state) {
         option.Some(continuation), _ ->
           Outcome(
             state: advanced,
@@ -437,37 +178,251 @@ fn feed_loop(
             continuation: WaitForMore,
           )
         option.None, False ->
-          feed_loop(
-            advanced,
-            combined_outgoing,
-            combined_events,
-            max_body_size,
-            max_params_size,
-          )
+          step_loop(advanced, combined_outgoing, combined_events, max_body_size)
       }
     }
   }
 }
 
-fn finish_params(buffer: BitArray, partial: PartialRequest) -> Step {
-  let updated = PartialRequest(..partial, params_done: True)
-  case updated.params_overflowed {
-    True -> overloaded_end(<<>>, updated)
-    False -> emit_start(buffer, updated)
+fn handle_abort(partial: PartialRequest) -> Action {
+  let reply =
+    protocol.encode_record(protocol.EndRequest(
+      request_id: partial.request_id,
+      app_status: 0,
+      protocol_status: protocol.RequestComplete,
+    ))
+  Action(
+    state: Idle(<<>>),
+    outgoing: reply,
+    events: [],
+    terminate: option.Some(CloseConnection),
+  )
+}
+
+fn handle_begin_request_busy(
+  buffer: BitArray,
+  partial: PartialRequest,
+  id: Int,
+) -> Action {
+  let reply =
+    protocol.encode_record(protocol.EndRequest(
+      request_id: id,
+      app_status: 0,
+      protocol_status: protocol.CantMultiplexConnection,
+    ))
+  Action(
+    state: Receiving(buffer, partial),
+    outgoing: reply,
+    events: [],
+    terminate: option.None,
+  )
+}
+
+fn handle_begin_request_idle(
+  buffer: BitArray,
+  id: Int,
+  role: Int,
+  keep: Bool,
+) -> Action {
+  case role == protocol.responder_role {
+    True -> {
+      let partial =
+        PartialRequest(
+          request_id: id,
+          keep_conn: keep,
+          params: <<>>,
+          started: False,
+          stdin_received: 0,
+          stdin_done: False,
+          body_overflowed: False,
+          params_overflowed: False,
+        )
+      unchanged(Receiving(buffer, partial))
+    }
+    False -> {
+      let reply =
+        protocol.encode_record(protocol.EndRequest(
+          request_id: id,
+          app_status: 0,
+          protocol_status: protocol.UnknownRole,
+        ))
+      Action(
+        state: Idle(buffer),
+        outgoing: reply,
+        events: [],
+        terminate: option.Some(CloseConnection),
+      )
+    }
   }
 }
 
-fn finish_stdin(buffer: BitArray, partial: PartialRequest) -> Step {
+fn handle_get_values(state: State, names: List(String)) -> Action {
+  let pairs = list.filter_map(names, lookup_capability)
+  let reply = protocol.encode_record(protocol.GetValuesResult(pairs:))
+  Action(state:, outgoing: reply, events: [], terminate: option.None)
+}
+
+fn handle_params(
+  buffer: BitArray,
+  partial: PartialRequest,
+  data: BitArray,
+) -> Action {
+  case bit_array.byte_size(data) {
+    0 -> finish_params(buffer, partial)
+    _ -> {
+      let #(params, overflow) =
+        merge_input(
+          partial.params,
+          partial.params_overflowed,
+          data,
+          protocol.max_record_content_size,
+        )
+      let updated =
+        PartialRequest(..partial, params:, params_overflowed: overflow)
+      unchanged(Receiving(buffer, updated))
+    }
+  }
+}
+
+fn handle_record(
+  state: State,
+  record: protocol.Incoming,
+  max_body_size: Int,
+) -> Action {
+  case state, record {
+    _, protocol.BeginRequest(0, _, _) ->
+      Action(
+        state:,
+        outgoing: bytes_tree.new(),
+        events: [],
+        terminate: option.Some(CloseConnection),
+      )
+    Idle(buffer), protocol.BeginRequest(id, role, keep) ->
+      handle_begin_request_idle(buffer, id, role, keep)
+    Receiving(buffer, partial), protocol.BeginRequest(id, _, _) ->
+      handle_begin_request_busy(buffer, partial, id)
+    Receiving(buffer, partial), protocol.Params(id, data)
+      if id == partial.request_id
+    -> handle_params(buffer, partial, data)
+    Receiving(buffer, partial), protocol.Stdin(id, data)
+      if id == partial.request_id
+    -> handle_stdin(buffer, partial, data, max_body_size)
+    Receiving(_, partial), protocol.AbortRequest(id)
+      if id == partial.request_id
+    -> handle_abort(partial)
+    _, protocol.GetValues(names) -> handle_get_values(state, names)
+    _, protocol.IncomingUnknown(0, type_byte) -> {
+      let reply = protocol.encode_record(protocol.UnknownType(type_byte:))
+      Action(state:, outgoing: reply, events: [], terminate: option.None)
+    }
+    _, _ -> unchanged(state)
+  }
+}
+
+fn handle_stdin(
+  buffer: BitArray,
+  partial: PartialRequest,
+  data: BitArray,
+  max_body_size: Int,
+) -> Action {
+  case bit_array.byte_size(data) {
+    0 -> finish_stdin(buffer, partial)
+    _ -> handle_stdin_chunk(buffer, partial, data, max_body_size)
+  }
+}
+
+fn handle_stdin_chunk(
+  buffer: BitArray,
+  partial: PartialRequest,
+  data: BitArray,
+  max_body_size: Int,
+) -> Action {
+  use <- bool.guard(
+    when: partial.body_overflowed,
+    return: unchanged(Receiving(buffer, partial)),
+  )
+  let new_total = partial.stdin_received + bit_array.byte_size(data)
+  case new_total > max_body_size {
+    True -> handle_stdin_overflow(buffer, partial)
+    False -> handle_stdin_in_bounds(buffer, partial, data, new_total)
+  }
+}
+
+fn handle_stdin_in_bounds(
+  buffer: BitArray,
+  partial: PartialRequest,
+  data: BitArray,
+  new_total: Int,
+) -> Action {
+  let updated = PartialRequest(..partial, stdin_received: new_total)
+  case partial.started {
+    True ->
+      Action(
+        state: Receiving(buffer, updated),
+        outgoing: bytes_tree.new(),
+        events: [BodyChunk(data)],
+        terminate: option.None,
+      )
+    False -> unchanged(Receiving(buffer, updated))
+  }
+}
+
+fn handle_stdin_overflow(buffer: BitArray, partial: PartialRequest) -> Action {
+  let updated = PartialRequest(..partial, body_overflowed: True)
+  case partial.started {
+    True ->
+      Action(
+        state: Receiving(buffer, updated),
+        outgoing: bytes_tree.new(),
+        events: [BodyTooLarge],
+        terminate: option.None,
+      )
+    False -> overloaded_end(buffer, partial)
+  }
+}
+
+fn emit_start(buffer: BitArray, partial: PartialRequest) -> Action {
+  let started = PartialRequest(..partial, started: True)
+  let start_event =
+    Start(
+      request_id: partial.request_id,
+      params: partial.params,
+      keep_conn: partial.keep_conn,
+    )
+  let events = case partial.stdin_done {
+    True -> [start_event, BodyEnd]
+    False -> [start_event]
+  }
+  let next_state = case partial.stdin_done {
+    True -> Idle(buffer)
+    False -> Receiving(buffer, started)
+  }
+  Action(
+    state: next_state,
+    outgoing: bytes_tree.new(),
+    events:,
+    terminate: option.None,
+  )
+}
+
+fn finish_params(buffer: BitArray, partial: PartialRequest) -> Action {
+  case partial.params_overflowed {
+    True -> overloaded_end(<<>>, partial)
+    False -> emit_start(buffer, partial)
+  }
+}
+
+fn finish_stdin(buffer: BitArray, partial: PartialRequest) -> Action {
   let updated = PartialRequest(..partial, stdin_done: True)
   case updated.started {
     True ->
-      Step(
+      Action(
         state: Idle(buffer),
         outgoing: bytes_tree.new(),
         events: [BodyEnd],
         terminate: option.None,
       )
-    False -> step(Receiving(buffer, updated))
+    False -> unchanged(Receiving(buffer, updated))
   }
 }
 
@@ -502,8 +457,8 @@ fn merge_input(
   }
 }
 
-fn overloaded_end(buffer: BitArray, partial: PartialRequest) -> Step {
-  Step(
+fn overloaded_end(buffer: BitArray, partial: PartialRequest) -> Action {
+  Action(
     state: Idle(buffer),
     outgoing: encode_overloaded_end(partial.request_id),
     events: [],
@@ -511,8 +466,8 @@ fn overloaded_end(buffer: BitArray, partial: PartialRequest) -> Step {
   )
 }
 
-fn step(state: State) -> Step {
-  Step(state:, outgoing: bytes_tree.new(), events: [], terminate: option.None)
+fn unchanged(state: State) -> Action {
+  Action(state:, outgoing: bytes_tree.new(), events: [], terminate: option.None)
 }
 
 fn with_buffer(state: State, buffer: BitArray) -> State {
@@ -520,8 +475,4 @@ fn with_buffer(state: State, buffer: BitArray) -> State {
     Idle(_) -> Idle(buffer)
     Receiving(_, partial) -> Receiving(buffer, partial)
   }
-}
-
-pub fn new() -> State {
-  Idle(<<>>)
 }

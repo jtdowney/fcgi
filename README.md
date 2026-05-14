@@ -30,7 +30,8 @@ pub fn main() {
 }
 
 fn handle_request(
-  _request: Request(fcgi.Body),
+  _request: Request(fcgi.BodyReader),
+  _ctx: fcgi.Context,
 ) -> Response(fcgi.ResponseData) {
   response.new(200)
   |> response.set_header("content-type", "text/plain; charset=utf-8")
@@ -83,4 +84,4 @@ example.com {
 }
 ```
 
-Caddy's `fastcgi` transport populates the standard FastCGI parameters that this library parses into a `gleam/http` `Request`.
+HTTP-shaped FastCGI parameters become a `gleam/http.Request`. Trusted CGI metadata (client address, auth, script name, etc.) is passed separately as `fcgi.Context`, with anything unrecognized in `extra`.

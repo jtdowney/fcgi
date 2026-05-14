@@ -142,8 +142,7 @@ pub fn outgoing_fixed_size_records_round_trip_test() {
     outgoing_fixed_size_record_generator(),
   )
   let bytes = bytes_tree.to_bit_array(protocol.encode_record(record))
-  let assert helpers.OutgoingParsed(parsed, rest) =
-    helpers.parse_outgoing(bytes)
+  let #(parsed, rest) = helpers.parse_outgoing(bytes)
   assert parsed == record
   assert rest == <<>>
 }
@@ -198,8 +197,7 @@ pub fn outgoing_data_records_round_trip_test() {
     outgoing_data_record_generator(),
   )
   let bytes = bytes_tree.to_bit_array(protocol.encode_record(record))
-  let assert helpers.OutgoingParsed(parsed, rest) =
-    helpers.parse_outgoing(bytes)
+  let #(parsed, rest) = helpers.parse_outgoing(bytes)
   assert parsed == record
   assert rest == <<>>
 }

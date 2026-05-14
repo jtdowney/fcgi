@@ -3,3 +3,5 @@
 /build
 /_build
 erl_crash.dump
+/.conclave/
+/bench/

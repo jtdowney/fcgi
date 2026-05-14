@@ -1,7 +1,5 @@
-import fcgi/internal/connection
 import fcgi/internal/protocol
 import gleam/bit_array
-import gleam/bool
 import gleam/bytes_tree
 import gleam/erlang/process
 import gleam/list
@@ -9,12 +7,6 @@ import gleam/otp/actor
 import temporary
 
 const supported_version = 1
-
-pub type OutgoingParseResult {
-  OutgoingParsed(record: protocol.Outgoing, rest: BitArray)
-  OutgoingNeedMore
-  OutgoingParseError(reason: protocol.ParseFailure)
-}
 
 @external(erlang, "gen_server", "stop")
 fn gen_server_stop(pid: process.Pid) -> Nil
@@ -65,34 +57,24 @@ pub fn request_stream_bytes(
   >>
 }
 
-pub fn parse_outgoing(buffer: BitArray) -> OutgoingParseResult {
-  case buffer {
-    <<
-      version:size(8),
-      record_type:size(8),
-      id:size(16),
-      content_length:size(16),
-      padding_length:size(8),
-      _reserved:size(8),
-      rest:bits,
-    >> -> {
-      use <- bool.guard(
-        when: version != supported_version,
-        return: OutgoingParseError(protocol.UnsupportedVersion(version)),
-      )
-      let total = content_length + padding_length
-      use <- bool.guard(
-        when: bit_array.byte_size(rest) < total,
-        return: OutgoingNeedMore,
-      )
+pub fn parse_outgoing(buffer: BitArray) -> #(protocol.Outgoing, BitArray) {
+  let assert <<
+    version:size(8),
+    record_type:size(8),
+    id:size(16),
+    content_length:size(16),
+    padding_length:size(8),
+    _reserved:size(8),
+    rest:bits,
+  >> = buffer
+  let assert True = version == supported_version
+  let total = content_length + padding_length
+  let assert True = bit_array.byte_size(rest) >= total
 
-      let trailer_length = bit_array.byte_size(rest) - total
-      let assert Ok(body) = bit_array.slice(rest, 0, content_length)
-      let assert Ok(remaining) = bit_array.slice(rest, total, trailer_length)
-      parse_outgoing_body(record_type, id, body, remaining)
-    }
-    _ -> OutgoingNeedMore
-  }
+  let trailer_length = bit_array.byte_size(rest) - total
+  let assert Ok(body) = bit_array.slice(rest, 0, content_length)
+  let assert Ok(remaining) = bit_array.slice(rest, total, trailer_length)
+  parse_outgoing_body(record_type, id, body, remaining)
 }
 
 fn parse_outgoing_body(
@@ -100,13 +82,13 @@ fn parse_outgoing_body(
   id: Int,
   body: BitArray,
   rest: BitArray,
-) -> OutgoingParseResult {
+) -> #(protocol.Outgoing, BitArray) {
   case record_type {
     3 -> parse_end_request(id, body, rest)
-    6 -> OutgoingParsed(protocol.Stdout(id, body), rest)
+    6 -> #(protocol.Stdout(id, body), rest)
     10 -> parse_get_values_result(body, rest)
     11 -> parse_unknown_type(body, rest)
-    _ -> OutgoingParseError(protocol.MalformedRecord)
+    _ -> panic as "unrecognised outgoing record type"
   }
 }
 
@@ -114,74 +96,55 @@ fn parse_end_request(
   id: Int,
   body: BitArray,
   rest: BitArray,
-) -> OutgoingParseResult {
-  case body {
-    <<app_status:size(32), protocol_status:size(8), _reserved:size(24)>> ->
-      case status_from_int(protocol_status) {
-        Ok(status) ->
-          OutgoingParsed(
-            protocol.EndRequest(
-              request_id: id,
-              app_status:,
-              protocol_status: status,
-            ),
-            rest,
-          )
-        Error(_) -> OutgoingParseError(protocol.MalformedRecord)
-      }
-    _ -> OutgoingParseError(protocol.MalformedRecord)
+) -> #(protocol.Outgoing, BitArray) {
+  let assert <<
+    app_status:size(32),
+    protocol_status:size(8),
+    _reserved:size(24),
+  >> = body
+  let status = case protocol_status {
+    0 -> protocol.RequestComplete
+    1 -> protocol.CantMultiplexConnection
+    2 -> protocol.Overloaded
+    3 -> protocol.UnknownRole
+    _ -> panic as "unrecognised protocol status"
   }
-}
-
-fn status_from_int(n: Int) -> Result(protocol.Status, Nil) {
-  case n {
-    0 -> Ok(protocol.RequestComplete)
-    1 -> Ok(protocol.CantMultiplexConnection)
-    2 -> Ok(protocol.Overloaded)
-    3 -> Ok(protocol.UnknownRole)
-    _ -> Error(Nil)
-  }
+  #(
+    protocol.EndRequest(request_id: id, app_status:, protocol_status: status),
+    rest,
+  )
 }
 
 fn parse_get_values_result(
   body: BitArray,
   rest: BitArray,
-) -> OutgoingParseResult {
-  case protocol.parse_name_value_pairs(body) {
-    Error(reason) -> OutgoingParseError(reason)
-    Ok(pairs) -> OutgoingParsed(protocol.GetValuesResult(pairs), rest)
-  }
+) -> #(protocol.Outgoing, BitArray) {
+  let assert Ok(pairs) = protocol.parse_name_value_pairs(body)
+  #(protocol.GetValuesResult(pairs), rest)
 }
 
-fn parse_unknown_type(body: BitArray, rest: BitArray) -> OutgoingParseResult {
-  case body {
-    <<type_byte:size(8), _reserved:size(56)>> ->
-      OutgoingParsed(protocol.UnknownType(type_byte), rest)
-    _ -> OutgoingParseError(protocol.MalformedRecord)
-  }
+fn parse_unknown_type(
+  body: BitArray,
+  rest: BitArray,
+) -> #(protocol.Outgoing, BitArray) {
+  let assert <<type_byte:size(8), _reserved:size(56)>> = body
+  #(protocol.UnknownType(type_byte), rest)
 }
 
-pub type DecodeError {
-  Truncated(remaining: BitArray)
-  DecodeParseError(reason: protocol.ParseFailure)
-}
-
-pub fn decode_all_records(
-  bytes: BitArray,
-) -> Result(List(protocol.Outgoing), DecodeError) {
+pub fn decode_all_records(bytes: BitArray) -> List(protocol.Outgoing) {
   decode_all_records_loop(bytes, [])
 }
 
 fn decode_all_records_loop(
   bytes: BitArray,
   acc: List(protocol.Outgoing),
-) -> Result(List(protocol.Outgoing), DecodeError) {
-  case bit_array.byte_size(bytes), parse_outgoing(bytes) {
-    0, _ -> Ok(list.reverse(acc))
-    _, OutgoingParsed(record, rest) ->
+) -> List(protocol.Outgoing) {
+  case bit_array.byte_size(bytes) {
+    0 -> list.reverse(acc)
+    _ -> {
+      let #(record, rest) = parse_outgoing(bytes)
       decode_all_records_loop(rest, [record, ..acc])
-    _, OutgoingNeedMore -> Error(Truncated(bytes))
-    _, OutgoingParseError(reason) -> Error(DecodeParseError(reason))
+    }
   }
 }
 
@@ -192,18 +155,4 @@ pub fn collect_stdout(records: List(protocol.Outgoing)) -> BitArray {
       _ -> acc
     }
   })
-}
-
-pub fn recv_until_closed(socket: connection.Socket) -> BitArray {
-  recv_until_closed_loop(socket, <<>>)
-}
-
-fn recv_until_closed_loop(
-  socket: connection.Socket,
-  acc: BitArray,
-) -> BitArray {
-  case connection.recv(socket, 0, 1000) {
-    Ok(bytes) -> recv_until_closed_loop(socket, <<acc:bits, bytes:bits>>)
-    Error(_) -> acc
-  }
 }

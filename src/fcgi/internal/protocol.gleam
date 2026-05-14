@@ -91,13 +91,6 @@ pub fn encode_name_value_pairs(pairs: List(#(String, String))) -> BytesTree {
   })
 }
 
-fn encode_length(n: Int) -> BitArray {
-  case n < 128 {
-    True -> <<n:size(8)>>
-    False -> <<1:size(1), n:size(31)>>
-  }
-}
-
 pub fn encode_record(record: Outgoing) -> BytesTree {
   case record {
     EndRequest(id, app_status, protocol_status) -> {
@@ -117,24 +110,34 @@ pub fn encode_record(record: Outgoing) -> BytesTree {
   }
 }
 
-fn status_to_int(status: Status) -> Int {
-  case status {
-    RequestComplete -> 0
-    CantMultiplexConnection -> 1
-    Overloaded -> 2
-    UnknownRole -> 3
-  }
+pub fn encode_stdout_frame_header(
+  request_id: Int,
+  content_length: Int,
+) -> #(BitArray, Int) {
+  let padding_length = padding_for(content_length)
+  let header = <<
+    supported_version:size(8),
+    6:size(8),
+    request_id:size(16),
+    content_length:size(16),
+    padding_length:size(8),
+    0:size(8),
+  >>
+  #(header, padding_length)
 }
 
-pub fn encode_stdout(request_id: Int, body: BytesTree) -> BytesTree {
-  frame_tree(6, request_id, body)
-}
-
-pub fn padding_for(content_length: Int) -> Int {
+fn padding_for(content_length: Int) -> Int {
   let remainder = content_length % 8
   case remainder {
     0 -> 0
     _ -> 8 - remainder
+  }
+}
+
+fn encode_length(n: Int) -> BitArray {
+  case n < 128 {
+    True -> <<n:size(8)>>
+    False -> <<1:size(1), n:size(31)>>
   }
 }
 
@@ -157,6 +160,15 @@ fn frame_tree(record_type: Int, request_id: Int, body: BytesTree) -> BytesTree {
   bytes_tree.from_bit_array(header)
   |> bytes_tree.append_tree(body)
   |> bytes_tree.append(padding)
+}
+
+fn status_to_int(status: Status) -> Int {
+  case status {
+    RequestComplete -> 0
+    CantMultiplexConnection -> 1
+    Overloaded -> 2
+    UnknownRole -> 3
+  }
 }
 
 pub type Incoming {
@@ -197,41 +209,6 @@ fn parse_name_value_pairs_loop(
 
   use #(pair, rest) <- result.try(parse_one_pair(bytes))
   parse_name_value_pairs_loop(rest, [pair, ..acc])
-}
-
-fn parse_one_pair(
-  bytes: BitArray,
-) -> Result(#(#(String, String), BitArray), ParseFailure) {
-  use #(name_length, after_name_length) <- result.try(parse_length(bytes))
-  use #(value_length, after_value_length) <- result.try(parse_length(
-    after_name_length,
-  ))
-  case after_value_length {
-    <<
-      name_bytes:bytes-size(name_length),
-      value_bytes:bytes-size(value_length),
-      rest:bits,
-    >> -> {
-      use name <- result.try(
-        bit_array.to_string(name_bytes)
-        |> result.replace_error(MalformedNameValue),
-      )
-      use value <- result.map(
-        bit_array.to_string(value_bytes)
-        |> result.replace_error(MalformedNameValue),
-      )
-      #(#(name, value), rest)
-    }
-    _ -> Error(MalformedNameValue)
-  }
-}
-
-fn parse_length(bytes: BitArray) -> Result(#(Int, BitArray), ParseFailure) {
-  case bytes {
-    <<0:size(1), n:size(7), rest:bits>> -> Ok(#(n, rest))
-    <<1:size(1), n:size(31), rest:bits>> -> Ok(#(n, rest))
-    _ -> Error(MalformedNameValue)
-  }
 }
 
 pub fn parse_record(buffer: BitArray) -> ParseResult {
@@ -279,6 +256,17 @@ fn parse_after_header(
   }
 }
 
+fn parse_begin_request(id: Int, body: BitArray, rest: BitArray) -> ParseResult {
+  case body {
+    <<role:size(16), _:size(7), keep_bit:size(1), _reserved:size(40)>> ->
+      Parsed(
+        BeginRequest(request_id: id, role:, keep_conn: keep_bit == 1),
+        rest,
+      )
+    _ -> ParseError(MalformedRecord)
+  }
+}
+
 fn parse_body(
   record_type: Int,
   id: Int,
@@ -295,17 +283,6 @@ fn parse_body(
   }
 }
 
-fn parse_begin_request(id: Int, body: BitArray, rest: BitArray) -> ParseResult {
-  case body {
-    <<role:size(16), _:size(7), keep_bit:size(1), _reserved:size(40)>> ->
-      Parsed(
-        BeginRequest(request_id: id, role:, keep_conn: keep_bit == 1),
-        rest,
-      )
-    _ -> ParseError(MalformedRecord)
-  }
-}
-
 fn parse_get_values(body: BitArray, rest: BitArray) -> ParseResult {
   case parse_name_value_pairs(body) {
     Error(reason) -> ParseError(reason)
@@ -313,5 +290,40 @@ fn parse_get_values(body: BitArray, rest: BitArray) -> ParseResult {
       let names = list.map(pairs, pair.first)
       Parsed(GetValues(names), rest)
     }
+  }
+}
+
+fn parse_length(bytes: BitArray) -> Result(#(Int, BitArray), ParseFailure) {
+  case bytes {
+    <<0:size(1), n:size(7), rest:bits>> -> Ok(#(n, rest))
+    <<1:size(1), n:size(31), rest:bits>> -> Ok(#(n, rest))
+    _ -> Error(MalformedNameValue)
+  }
+}
+
+fn parse_one_pair(
+  bytes: BitArray,
+) -> Result(#(#(String, String), BitArray), ParseFailure) {
+  use #(name_length, after_name_length) <- result.try(parse_length(bytes))
+  use #(value_length, after_value_length) <- result.try(parse_length(
+    after_name_length,
+  ))
+  case after_value_length {
+    <<
+      name_bytes:bytes-size(name_length),
+      value_bytes:bytes-size(value_length),
+      rest:bits,
+    >> -> {
+      use name <- result.try(
+        bit_array.to_string(name_bytes)
+        |> result.replace_error(MalformedNameValue),
+      )
+      use value <- result.map(
+        bit_array.to_string(value_bytes)
+        |> result.replace_error(MalformedNameValue),
+      )
+      #(#(name, value), rest)
+    }
+    _ -> Error(MalformedNameValue)
   }
 }

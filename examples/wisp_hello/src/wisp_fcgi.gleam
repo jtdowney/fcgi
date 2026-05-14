@@ -22,9 +22,10 @@ import wisp/internal as wisp_internal
 pub fn handler(
   handler: fn(wisp.Request) -> wisp.Response,
   secret_key_base: String,
-) -> fn(HttpRequest(fcgi.Body)) -> HttpResponse(fcgi.ResponseData) {
-  fn(req: HttpRequest(fcgi.Body)) {
-    let reader = fn(_size) { wrap_chunk(fcgi.read_chunk(req.body)) }
+) -> fn(HttpRequest(fcgi.BodyReader), fcgi.Context) ->
+  HttpResponse(fcgi.ResponseData) {
+  fn(req: HttpRequest(fcgi.BodyReader), _ctx: fcgi.Context) {
+    let reader = fn(_size) { wrap_chunk(req.body()) }
     let connection = wisp_internal.make_connection(reader, secret_key_base)
     let req = request.set_body(req, connection)
 
@@ -50,16 +51,14 @@ fn wrap_chunk(
   |> result.replace_error(Nil)
   |> result.map(fn(chunk) {
     case chunk {
-      fcgi.ReadingFinished -> wisp_internal.ReadingFinished
+      fcgi.End -> wisp_internal.ReadingFinished
       fcgi.Chunk(data, consume) ->
         wisp_internal.Chunk(data, fn(_size) { wrap_chunk(consume()) })
     }
   })
 }
 
-pub fn map_response(
-  response: wisp.Response,
-) -> HttpResponse(fcgi.ResponseData) {
+fn map_response(response: wisp.Response) -> HttpResponse(fcgi.ResponseData) {
   case response.body {
     wisp.Text(text) ->
       response.set_body(response, fcgi.bytes(bytes_tree.from_string(text)))
