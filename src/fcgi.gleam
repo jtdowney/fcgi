@@ -21,6 +21,7 @@ import gleam/otp/static_supervisor.{type Supervisor}
 import gleam/otp/supervision
 import gleam/result
 import gleam/string
+import logging
 
 const default_body_read_timeout_ms = 30_000
 
@@ -319,17 +320,23 @@ pub fn start(
 
   use started <- result.try(start_supervisor(supervisor, socket, address))
 
-  controlling_process(socket, started.pid)
-  |> result.replace(started)
-  |> result.map_error(fn(error) {
-    process.unlink(started.pid)
-    process.send_abnormal_exit(started.pid, atom.create("shutdown"))
-    cleanup_socket(socket, address)
-
-    ListenerError(
-      "controlling_process failed: " <> describe_transport_error(error),
-    )
-  })
+  case controlling_process(socket, started.pid) {
+    Ok(Nil) -> {
+      logging.log(
+        logging.Info,
+        "fcgi listening on " <> describe_address(address),
+      )
+      Ok(started)
+    }
+    Error(error) -> {
+      process.unlink(started.pid)
+      process.send_abnormal_exit(started.pid, atom.create("shutdown"))
+      cleanup_socket(socket, address)
+      Error(ListenerError(
+        "controlling_process failed: " <> describe_transport_error(error),
+      ))
+    }
+  }
 }
 
 /// Build a `supervision.ChildSpecification` so the server runs under an
@@ -389,6 +396,10 @@ fn accept_loop(
     Error(reason) -> {
       case atom.to_string(reason) {
         "emfile" | "enfile" -> {
+          logging.log(
+            logging.Warning,
+            "accept failed: file descriptor exhaustion, retrying",
+          )
           process.sleep(100)
         }
         _ -> Nil
@@ -461,6 +472,19 @@ fn connection_factory_supervised(
   |> factory_supervisor.named(name)
   |> factory_supervisor.supervised
   |> supervision.restart(supervision.Transient)
+}
+
+fn describe_address(address: Address) -> String {
+  case address {
+    PathAddress(path) -> "unix:" <> path
+    TcpAddress(host, port) -> {
+      let host = case string.contains(host, ":") {
+        True -> "[" <> host <> "]"
+        False -> host
+      }
+      host <> ":" <> int.to_string(port)
+    }
+  }
 }
 
 fn describe_transport_error(error: SocketError) -> String {
@@ -592,7 +616,9 @@ fn run_connection_loop(worker: Worker, state: handler.State) -> Nil {
   case await_next_request(worker, state, <<>>) {
     Closed -> Nil
     Ready(state:, request_id:, params:, body_queue:, keep_conn:) ->
-      case serve_request(worker, state, request_id, params, body_queue, keep_conn) {
+      case
+        serve_request(worker, state, request_id, params, body_queue, keep_conn)
+      {
         Error(_) -> Nil
         Ok(next_state) -> run_connection_loop(worker, next_state)
       }
@@ -825,6 +851,12 @@ fn handle_request(
   use <- bool.lazy_guard(
     when: list.contains(events, handler.BodyTooLarge),
     return: fn() {
+      logging.log(
+        logging.Warning,
+        "rejecting request: body exceeded max_body_size of "
+          <> int.to_string(worker.max_body_size)
+          <> " bytes",
+      )
       let _ =
         send_if_nonempty(
           worker.socket,
@@ -836,6 +868,7 @@ fn handle_request(
 
   case parse_params(params) {
     Error(message) -> {
+      logging.log(logging.Warning, "rejecting request: " <> message)
       let response = error_response(400, message)
       send_response(worker.socket, request_id, response)
       |> result.replace(option.None)
@@ -923,7 +956,9 @@ fn resolve_unbracketed_host(
 ) -> #(String, Option(Int)) {
   case string.split_once(raw, ":") {
     Ok(#(host, port_str)) if host != "" -> {
-      let port = int.parse(port_str) |> option.from_result
+      let port =
+        int.parse(port_str)
+        |> option.from_result
       #(host, option.or(port, server_port))
     }
     _ -> #(raw, server_port)
@@ -938,7 +973,13 @@ fn run_user_handler(
 ) -> Response(ResponseData) {
   case exception.rescue(fn() { handler_fn(req, ctx, reader) }) {
     Ok(resp) -> resp
-    Error(_) -> error_response(500, "internal server error")
+    Error(exception) -> {
+      logging.log(
+        logging.Error,
+        "handler crashed: " <> string.inspect(exception),
+      )
+      error_response(500, "internal server error")
+    }
   }
 }
 
@@ -1008,7 +1049,14 @@ fn send_response(
       )
 
       let sender = StreamSender(socket:, request_id:)
-      let _ = exception.rescue(fn() { producer(sender) })
+      case exception.rescue(fn() { producer(sender) }) {
+        Ok(_) -> Nil
+        Error(exception) ->
+          logging.log(
+            logging.Error,
+            "stream producer crashed: " <> string.inspect(exception),
+          )
+      }
 
       send_tree(socket, terminator)
       |> result.replace_error(Nil)
