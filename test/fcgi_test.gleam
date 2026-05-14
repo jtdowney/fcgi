@@ -80,7 +80,7 @@ fn run_handler_with_body(
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -108,7 +108,7 @@ fn run_unreachable_handler(request_bytes: BitArray) -> String {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -231,7 +231,7 @@ fn run_context_handler(params: List(#(String, String))) -> String {
   let assert Ok(started) =
     context_dump_handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let request_bytes =
@@ -266,7 +266,7 @@ pub fn end_to_end_get_returns_handler_body_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -340,7 +340,7 @@ pub fn file_unlinked_after_send_file_still_streams_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(socket_path)
+    |> fcgi.listen_unix(socket_path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(socket_path)
@@ -492,7 +492,7 @@ pub fn builder_max_body_size_rejects_oversized_body_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.max_body_size(1)
     |> fcgi.start
 
@@ -530,7 +530,7 @@ pub fn handler_panic_returns_500_response_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -581,7 +581,7 @@ pub fn request_body_is_passed_through_to_handler_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -636,7 +636,7 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -693,7 +693,7 @@ pub fn builder_body_read_timeout_surfaces_to_body_reader_test() {
     handler
     |> fcgi.new
     |> fcgi.body_read_timeout(100)
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -751,7 +751,7 @@ pub fn body_reader_returns_client_disconnected_when_peer_closes_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -787,7 +787,7 @@ pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -837,7 +837,7 @@ pub fn stream_send_chunk_splits_large_payload_into_max_size_records_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -890,7 +890,7 @@ pub fn stream_producer_panic_still_emits_end_request_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -937,7 +937,7 @@ pub fn stream_send_chunk_returns_error_after_peer_disconnect_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -998,7 +998,7 @@ pub fn supervised_spec_starts_and_serves_request_test() {
   let spec =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.supervised
 
   let assert Ok(started) = spec.start()
@@ -1027,7 +1027,7 @@ pub fn supervised_spec_returns_init_failed_on_listener_error_test() {
   let spec =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.supervised
 
   let assert Error(actor.InitFailed(reason)) = spec.start()
@@ -1045,7 +1045,7 @@ pub fn socket_path_already_exists_returns_error_test() {
   let assert Error(fcgi.ListenerError(reason)) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
   assert reason == "socket path already exists: " <> path
 }
@@ -1062,7 +1062,7 @@ pub fn fcgi_start_replaces_stale_socket_path_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
   helpers.stop_supervisor(started)
 }
@@ -1076,7 +1076,7 @@ pub fn negative_max_body_size_returns_error_test() {
   let assert Error(fcgi.InvalidMaxBodySize(reported)) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.max_body_size(-1)
     |> fcgi.start
   assert reported == -1
@@ -1091,7 +1091,7 @@ pub fn listener_error_when_parent_directory_missing_test() {
   let assert Error(fcgi.ListenerError(reason)) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
   assert reason == "listen failed: enoent"
 }
@@ -1105,7 +1105,7 @@ pub fn non_positive_body_read_timeout_returns_error_test() {
   let assert Error(fcgi.InvalidBodyReadTimeout(reported)) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.body_read_timeout(0)
     |> fcgi.start
   assert reported == 0
@@ -1119,7 +1119,7 @@ pub fn socket_path_unlinks_on_stop_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(_info) = simplifile.file_info(path)
@@ -1134,7 +1134,7 @@ pub fn keep_alive_streams_two_sequential_requests_on_one_socket_test() {
   let assert Ok(started) =
     echo_handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -1162,7 +1162,7 @@ pub fn keep_alive_handles_pipelined_requests_in_one_send_test() {
   let assert Ok(started) =
     echo_handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -1195,7 +1195,7 @@ pub fn keep_alive_drains_unread_body_before_next_request_test() {
   let assert Ok(started) =
     ignore_body_handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -1223,7 +1223,7 @@ pub fn keep_conn_false_closes_socket_after_response_test() {
   let assert Ok(started) =
     echo_handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let assert Ok(socket) = test_client.connect_unix(path)
@@ -1270,7 +1270,7 @@ pub fn keep_alive_does_not_loop_when_body_overflows_test() {
   let assert Ok(started) =
     echo_or_413_handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.max_body_size(4)
     |> fcgi.start
 
@@ -1295,7 +1295,7 @@ pub fn end_to_end_handles_concurrent_connections_test() {
   let assert Ok(started) =
     echo_handler
     |> fcgi.new
-    |> fcgi.listen_path(path)
+    |> fcgi.listen_unix(path)
     |> fcgi.start
 
   let signal = process.new_subject()

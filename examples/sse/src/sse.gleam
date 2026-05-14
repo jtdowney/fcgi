@@ -25,7 +25,7 @@ pub fn main() -> Nil {
   let assert Ok(_) =
     handle_request
     |> fcgi.new
-    |> fcgi.listen_path(socket_path)
+    |> fcgi.listen_unix(socket_path)
     |> fcgi.start
 
   io.println("Listening on unix:" <> socket_path)

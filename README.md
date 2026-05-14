@@ -23,7 +23,7 @@ import gleam/http/response.{type Response}
 pub fn main() {
   let assert Ok(_) =
     fcgi.new(handle_request)
-    |> fcgi.listen_path("/tmp/fcgi.sock")
+    |> fcgi.listen_unix("/tmp/fcgi.sock")
     |> fcgi.start
 
   process.sleep_forever()
@@ -58,7 +58,7 @@ pub fn main() {
     handle_request
     |> wisp_fcgi.handler(secret_key_base)
     |> fcgi.new
-    |> fcgi.listen_path("/tmp/fcgi.sock")
+    |> fcgi.listen_unix("/tmp/fcgi.sock")
     |> fcgi.start
 
   process.sleep_forever()

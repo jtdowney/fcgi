@@ -14,7 +14,7 @@ pub fn main() -> Nil {
     handle_request
     |> wisp_fcgi.handler(secret_key_base)
     |> fcgi.new
-    |> fcgi.listen_path(socket_path)
+    |> fcgi.listen_unix(socket_path)
     |> fcgi.start
 
   io.println("Listening on unix:" <> socket_path)

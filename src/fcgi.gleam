@@ -111,7 +111,7 @@ pub fn body_read_timeout(
 }
 
 /// Set the Unix domain socket path the server listens on.
-pub fn listen_path(
+pub fn listen_unix(
   builder: Builder(address),
   path: String,
 ) -> Builder(HasAddress) {
@@ -301,7 +301,7 @@ pub fn start(
     return: Error(InvalidBodyReadTimeout(builder.body_read_timeout_ms)),
   )
   let assert option.Some(address) = builder.address
-  use socket <- result.try(open_socket(address))
+  use socket <- result.try(listen_on_address(address))
   let factory_name = process.new_name(prefix: "fcgi_server_factory")
   let handler = fn(req: Request(Nil), ctx: Context, reader: BodyReader) {
     builder.handler(request.set_body(req, reader), ctx)
@@ -318,7 +318,18 @@ pub fn start(
     )
 
   use started <- result.try(start_supervisor(supervisor, socket, address))
-  handoff_socket(socket, address, started)
+
+  controlling_process(socket, started.pid)
+  |> result.replace(started)
+  |> result.map_error(fn(error) {
+    process.unlink(started.pid)
+    process.send_abnormal_exit(started.pid, atom.create("shutdown"))
+    cleanup_socket(socket, address)
+
+    ListenerError(
+      "controlling_process failed: " <> describe_transport_error(error),
+    )
+  })
 }
 
 /// Build a `supervision.ChildSpecification` so the server runs under an
@@ -329,7 +340,16 @@ pub fn supervised(
   supervision.supervisor(fn() {
     start(builder)
     |> result.map_error(fn(error) {
-      actor.InitFailed(describe_start_error(error))
+      let reason = case error {
+        ListenerError(reason) -> reason
+        InvalidMaxBodySize(bytes) ->
+          "max_body_size must be non-negative; got " <> int.to_string(bytes)
+        InvalidBodyReadTimeout(milliseconds) ->
+          "body_read_timeout must be positive; got "
+          <> int.to_string(milliseconds)
+      }
+
+      actor.InitFailed(reason)
     })
   })
 }
@@ -366,28 +386,14 @@ fn accept_loop(
   handler: ServerHandler,
 ) -> Nil {
   case accept(listen_socket) {
-    Error(reason) ->
+    Error(reason) -> {
       case atom.to_string(reason) {
-        "closed" -> Nil
         "emfile" | "enfile" -> {
           process.sleep(100)
-          accept_loop(
-            listen_socket,
-            factory,
-            max_body_size,
-            body_read_timeout_ms,
-            handler,
-          )
         }
-        _ ->
-          accept_loop(
-            listen_socket,
-            factory,
-            max_body_size,
-            body_read_timeout_ms,
-            handler,
-          )
+        _ -> Nil
       }
+    }
     Ok(client) -> {
       let worker =
         Worker(socket: client, max_body_size:, body_read_timeout_ms:, handler:)
@@ -395,22 +401,23 @@ fn accept_loop(
         Error(_) -> close_socket(client)
         Ok(started) ->
           case controlling_process(client, started.pid) {
-            Ok(Nil) -> Nil
             Error(_) -> {
               close_socket(client)
               process.send_exit(started.pid)
             }
+            Ok(Nil) -> Nil
           }
       }
-      accept_loop(
-        listen_socket,
-        factory,
-        max_body_size,
-        body_read_timeout_ms,
-        handler,
-      )
     }
   }
+
+  accept_loop(
+    listen_socket,
+    factory,
+    max_body_size,
+    body_read_timeout_ms,
+    handler,
+  )
 }
 
 fn build_supervisor(
@@ -456,16 +463,6 @@ fn connection_factory_supervised(
   |> supervision.restart(supervision.Transient)
 }
 
-fn describe_start_error(error: StartError) -> String {
-  case error {
-    ListenerError(reason) -> reason
-    InvalidMaxBodySize(bytes) ->
-      "max_body_size must be non-negative; got " <> int.to_string(bytes)
-    InvalidBodyReadTimeout(milliseconds) ->
-      "body_read_timeout must be positive; got " <> int.to_string(milliseconds)
-  }
-}
-
 fn describe_transport_error(error: SocketError) -> String {
   case error {
     Posix(reason) -> atom.to_string(reason)
@@ -473,28 +470,10 @@ fn describe_transport_error(error: SocketError) -> String {
   }
 }
 
-fn handoff_socket(
-  socket: Socket,
-  address: Address,
-  started: actor.Started(Supervisor),
-) -> Result(actor.Started(Supervisor), StartError) {
-  case controlling_process(socket, started.pid) {
-    Ok(Nil) -> Ok(started)
-    Error(error) -> {
-      process.unlink(started.pid)
-      process.send_abnormal_exit(started.pid, atom.create("shutdown"))
-      cleanup_socket(socket, address)
-      Error(ListenerError(
-        "controlling_process failed: " <> describe_transport_error(error),
-      ))
-    }
-  }
-}
-
-fn open_socket(address: Address) -> Result(Socket, StartError) {
+fn listen_on_address(address: Address) -> Result(Socket, StartError) {
   case address {
     PathAddress(path) ->
-      listen_unix(path)
+      do_listen_unix(path)
       |> result.map_error(fn(error) {
         case error {
           PathExists(path) ->
@@ -504,7 +483,7 @@ fn open_socket(address: Address) -> Result(Socket, StartError) {
         }
       })
     TcpAddress(host, port) ->
-      bind_tcp(host, port)
+      do_listen_tcp(host, port)
       |> result.map_error(fn(error) {
         case error {
           InvalidHost(host) ->
@@ -601,42 +580,53 @@ type Worker {
 }
 
 fn start_connection(worker: Worker) -> actor.StartResult(Nil) {
-  actor.new_with_initialiser(1000, fn(self_subject) {
-    process.send(self_subject, Nil)
-    let selector = process.new_selector() |> process.select(self_subject)
-    actor.initialised(worker)
-    |> actor.selecting(selector)
-    |> actor.returning(Nil)
-    |> Ok
-  })
-  |> actor.on_message(fn(spec, _msg) {
-    run_connection_loop(spec, handler.Idle(<<>>), <<>>)
-    close_socket(spec.socket)
-    actor.stop()
-  })
-  |> actor.start
+  let pid =
+    process.spawn(fn() {
+      run_connection_loop(worker, handler.Idle(<<>>))
+      close_socket(worker.socket)
+    })
+  Ok(actor.Started(pid:, data: Nil))
 }
 
-fn run_connection_loop(
+fn run_connection_loop(worker: Worker, state: handler.State) -> Nil {
+  case await_next_request(worker, state, <<>>) {
+    Closed -> Nil
+    Ready(state:, request_id:, params:, body_queue:, keep_conn:) ->
+      case serve_request(worker, state, request_id, params, body_queue, keep_conn) {
+        Error(_) -> Nil
+        Ok(next_state) -> run_connection_loop(worker, next_state)
+      }
+  }
+}
+
+fn serve_request(
   worker: Worker,
   state: handler.State,
-  pending: BitArray,
-) -> Nil {
-  case await_next_request(worker, state, pending) {
-    Closed -> Nil
-    Ready(request_state, request_id, params, body_queue, keep_conn) -> {
-      let send_result =
-        handle_request(worker, request_state, request_id, params, body_queue)
-      case send_result, keep_conn {
-        Error(_), _ -> Nil
-        Ok(_), False -> Nil
-        Ok(tracker), True ->
-          case finalize_request(worker, tracker, request_state) {
-            Error(_) -> Nil
-            Ok(next_state) -> run_connection_loop(worker, next_state, <<>>)
-          }
-      }
-    }
+  request_id: Int,
+  params: BitArray,
+  body_queue: List(handler.Event),
+  keep_conn: Bool,
+) -> Result(handler.State, Nil) {
+  use tracker <- result.try(handle_request(
+    worker,
+    state,
+    request_id,
+    params,
+    body_queue,
+  ))
+  use <- bool.guard(when: !keep_conn, return: Error(Nil))
+  case tracker {
+    option.None -> Ok(state)
+    option.Some(tracker) ->
+      body_reader.finalize(
+        tracker:,
+        max_body_size: worker.max_body_size,
+        recv: fn() { adapt_recv(worker) },
+        send: fn(bytes) {
+          let _ = send_if_nonempty(worker.socket, bytes)
+          Nil
+        },
+      )
   }
 }
 
@@ -822,26 +812,6 @@ fn extract_start(
       option.Some(#(request_id, params, keep_conn, rest))
     [_, ..rest] -> extract_start(rest)
     [] -> option.None
-  }
-}
-
-fn finalize_request(
-  worker: Worker,
-  tracker: Option(body_reader.Tracker),
-  final_state: handler.State,
-) -> Result(handler.State, Nil) {
-  case tracker {
-    option.None -> Ok(final_state)
-    option.Some(tracker) ->
-      body_reader.finalize(
-        tracker:,
-        max_body_size: worker.max_body_size,
-        recv: fn() { adapt_recv(worker) },
-        send: fn(bytes) {
-          let _ = send_if_nonempty(worker.socket, bytes)
-          Nil
-        },
-      )
   }
 }
 
@@ -1106,7 +1076,10 @@ type SocketError {
 fn accept(listen: Socket) -> Result(Socket, Atom)
 
 @external(erlang, "fcgi_ffi", "listen_tcp")
-fn bind_tcp(host: String, port: Int) -> Result(Socket, SocketError)
+fn do_listen_tcp(host: String, port: Int) -> Result(Socket, SocketError)
+
+@external(erlang, "fcgi_ffi", "listen_unix")
+fn do_listen_unix(path: String) -> Result(Socket, SocketError)
 
 @external(erlang, "fcgi_ffi", "close_file")
 fn close_file(handle: Handle) -> Nil
@@ -1122,9 +1095,6 @@ fn controlling_process(
 
 @external(erlang, "fcgi_ffi", "delete_path")
 fn delete_path(path: String) -> Nil
-
-@external(erlang, "fcgi_ffi", "listen_unix")
-fn listen_unix(path: String) -> Result(Socket, SocketError)
 
 @external(erlang, "fcgi_ffi", "open_and_size")
 fn open_and_size(path: String) -> Result(#(Handle, Int), FileError)
