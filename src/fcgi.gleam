@@ -29,6 +29,128 @@ const default_max_body_size = 268_435_456
 
 const socket_owner_transfer_timeout_ms = 5000
 
+/// Listen address set on a `Builder` via `listen_unix` or `listen_tcp`.
+pub opaque type Address {
+  PathAddress(path: String)
+  TcpAddress(host: String, port: Int)
+}
+
+/// Server configuration produced by `new`. Pass it to `start` to begin
+/// listening.
+pub opaque type Builder(address) {
+  Builder(
+    handler: Handler,
+    address: address,
+    max_body_size: Int,
+    body_read_timeout_ms: Int,
+  )
+}
+
+type Handler =
+  fn(Request(BodyReader), Context) -> Response(ResponseData)
+
+/// Build a new FastCGI server with the given handler.
+///
+/// The handler is invoked once `Params` is fully received. The request
+/// body is delivered incrementally via a `BodyReader` in `req.body`;
+/// call it to obtain the first `Read` and thread `consume` to advance,
+/// or pass it to `read_all` for the buffered case.
+///
+/// Default: 256 MiB max body, 30 s body read timeout.
+pub fn new(handler: Handler) -> Builder(Nil) {
+  Builder(
+    handler:,
+    address: Nil,
+    max_body_size: default_max_body_size,
+    body_read_timeout_ms: default_body_read_timeout_ms,
+  )
+}
+
+/// Set the Unix domain socket path the server listens on.
+pub fn listen_unix(
+  builder: Builder(address),
+  path: String,
+) -> Builder(Address) {
+  Builder(
+    handler: builder.handler,
+    address: PathAddress(path),
+    max_body_size: builder.max_body_size,
+    body_read_timeout_ms: builder.body_read_timeout_ms,
+  )
+}
+
+/// Set the TCP `host` and `port` the server listens on. `host` must be a
+/// numeric IP literal: either IPv4 (e.g. `"127.0.0.1"`, `"0.0.0.0"`) or
+/// IPv6 (e.g. `"::1"`, `"::"`).
+pub fn listen_tcp(
+  builder: Builder(address),
+  host host: String,
+  port port: Int,
+) -> Builder(Address) {
+  Builder(
+    handler: builder.handler,
+    address: TcpAddress(host, port),
+    max_body_size: builder.max_body_size,
+    body_read_timeout_ms: builder.body_read_timeout_ms,
+  )
+}
+
+/// Set the maximum body bytes the server will deliver to the handler in
+/// total across all body reads. Must be `>= 0`; `start` returns
+/// `InvalidMaxBodySize(bytes)` for negative values.
+///
+/// When the peer sends more than this many bytes, the next body read
+/// returns `Error(BodyTooLarge)`.
+///
+/// Default: 256 MiB.
+pub fn max_body_size(
+  builder: Builder(address),
+  bytes: Int,
+) -> Builder(address) {
+  Builder(..builder, max_body_size: bytes)
+}
+
+/// Set how long the server waits for the next stdin or params record
+/// before giving up. Must be `> 0`. Applies between successive socket
+/// reads, including the wait for the first record after `accept`, not
+/// to the request as a whole. Returns `Error(ReadTimeout)` to body
+/// readers. Default: 30,000 ms.
+pub fn body_read_timeout(
+  builder: Builder(address),
+  milliseconds: Int,
+) -> Builder(address) {
+  Builder(..builder, body_read_timeout_ms: milliseconds)
+}
+
+/// Trusted CGI metadata supplied by the upstream proxy and handed to
+/// every request handler alongside the `Request`.
+pub type Context {
+  Context(
+    /// Client address as reported by the proxy (CGI `REMOTE_ADDR`).
+    remote_addr: Option(String),
+    /// Client port parsed as `Int`; absent if the proxy did not supply a
+    /// numeric value (CGI `REMOTE_PORT`).
+    remote_port: Option(Int),
+    /// Reverse-DNS hostname of the client, when the proxy resolved one
+    /// (CGI `REMOTE_HOST`).
+    remote_host: Option(String),
+    /// Authenticated identity, when the proxy set one (CGI `REMOTE_USER`).
+    remote_user: Option(String),
+    /// Authentication scheme, e.g. `"Basic"` (CGI `AUTH_TYPE`).
+    auth_type: Option(String),
+    /// Mount prefix assigned to the app by the proxy (CGI `SCRIPT_NAME`).
+    script_name: Option(String),
+    /// HTTP protocol version reported by the proxy, e.g. `"HTTP/1.1"`
+    /// (CGI `SERVER_PROTOCOL`).
+    server_protocol: Option(String),
+    /// Identification string from the upstream proxy (CGI `SERVER_SOFTWARE`).
+    server_software: Option(String),
+    /// Any other CGI variables, keyed by their original uppercase name.
+    /// Typical entries include `"DOCUMENT_ROOT"` and `"REQUEST_URI"`.
+    extra: Dict(String, String),
+  )
+}
+
 /// Streaming reader for the request body. The handler receives one in
 /// `req.body`; call it to obtain the first `Read`, then advance via the
 /// `consume` continuation returned in each `Chunk`.
@@ -77,128 +199,6 @@ fn read_all_loop(
   }
 }
 
-/// Listen address set on a `Builder` via `listen_unix` or `listen_tcp`.
-pub opaque type Address {
-  PathAddress(path: String)
-  TcpAddress(host: String, port: Int)
-}
-
-/// Server configuration produced by `new`. Pass it to `start` to begin
-/// listening.
-pub opaque type Builder(address) {
-  Builder(
-    handler: Handler,
-    address: address,
-    max_body_size: Int,
-    body_read_timeout_ms: Int,
-  )
-}
-
-type Handler =
-  fn(Request(BodyReader), Context) -> Response(ResponseData)
-
-/// Set how long the server waits for the next stdin or params record
-/// before giving up. Must be `> 0`. Applies between successive socket
-/// reads, including the wait for the first record after `accept`, not
-/// to the request as a whole. Returns `Error(ReadTimeout)` to body
-/// readers. Default: 30,000 ms.
-pub fn body_read_timeout(
-  builder: Builder(address),
-  milliseconds: Int,
-) -> Builder(address) {
-  Builder(..builder, body_read_timeout_ms: milliseconds)
-}
-
-/// Set the Unix domain socket path the server listens on.
-pub fn listen_unix(
-  builder: Builder(address),
-  path: String,
-) -> Builder(Address) {
-  Builder(
-    handler: builder.handler,
-    address: PathAddress(path),
-    max_body_size: builder.max_body_size,
-    body_read_timeout_ms: builder.body_read_timeout_ms,
-  )
-}
-
-/// Set the TCP `host` and `port` the server listens on. `host` must be a
-/// numeric IP literal: either IPv4 (e.g. `"127.0.0.1"`, `"0.0.0.0"`) or
-/// IPv6 (e.g. `"::1"`, `"::"`).
-pub fn listen_tcp(
-  builder: Builder(address),
-  host host: String,
-  port port: Int,
-) -> Builder(Address) {
-  Builder(
-    handler: builder.handler,
-    address: TcpAddress(host, port),
-    max_body_size: builder.max_body_size,
-    body_read_timeout_ms: builder.body_read_timeout_ms,
-  )
-}
-
-/// Set the maximum body bytes the server will deliver to the handler in
-/// total across all body reads. Must be `>= 0`; `start` returns
-/// `InvalidMaxBodySize(bytes)` for negative values.
-///
-/// When the peer sends more than this many bytes, the next body read
-/// returns `Error(BodyTooLarge)`.
-///
-/// Default: 256 MiB.
-pub fn max_body_size(
-  builder: Builder(address),
-  bytes: Int,
-) -> Builder(address) {
-  Builder(..builder, max_body_size: bytes)
-}
-
-/// Build a new FastCGI server with the given handler.
-///
-/// The handler is invoked once `Params` is fully received. The request
-/// body is delivered incrementally via a `BodyReader` in `req.body`;
-/// call it to obtain the first `Read` and thread `consume` to advance,
-/// or pass it to `read_all` for the buffered case.
-///
-/// Default: 256 MiB max body, 30 s body read timeout.
-pub fn new(handler: Handler) -> Builder(Nil) {
-  Builder(
-    handler:,
-    address: Nil,
-    max_body_size: default_max_body_size,
-    body_read_timeout_ms: default_body_read_timeout_ms,
-  )
-}
-
-/// Trusted CGI metadata supplied by the upstream proxy and handed to
-/// every request handler alongside the `Request`.
-pub type Context {
-  Context(
-    /// Client address as reported by the proxy (CGI `REMOTE_ADDR`).
-    remote_addr: Option(String),
-    /// Client port parsed as `Int`; absent if the proxy did not supply a
-    /// numeric value (CGI `REMOTE_PORT`).
-    remote_port: Option(Int),
-    /// Reverse-DNS hostname of the client, when the proxy resolved one
-    /// (CGI `REMOTE_HOST`).
-    remote_host: Option(String),
-    /// Authenticated identity, when the proxy set one (CGI `REMOTE_USER`).
-    remote_user: Option(String),
-    /// Authentication scheme, e.g. `"Basic"` (CGI `AUTH_TYPE`).
-    auth_type: Option(String),
-    /// Mount prefix assigned to the app by the proxy (CGI `SCRIPT_NAME`).
-    script_name: Option(String),
-    /// HTTP protocol version reported by the proxy, e.g. `"HTTP/1.1"`
-    /// (CGI `SERVER_PROTOCOL`).
-    server_protocol: Option(String),
-    /// Identification string from the upstream proxy (CGI `SERVER_SOFTWARE`).
-    server_software: Option(String),
-    /// Any other CGI variables, keyed by their original uppercase name.
-    /// Typical entries include `"DOCUMENT_ROOT"` and `"REQUEST_URI"`.
-    extra: Dict(String, String),
-  )
-}
-
 /// Why `send_file` could not produce a `File` body.
 pub type FileError {
   /// No file exists at the given path.
@@ -225,16 +225,6 @@ pub opaque type ResponseData {
 /// `STDOUT` records on the open connection.
 pub opaque type StreamSender {
   StreamSender(socket: Socket, request_id: Int)
-}
-
-/// Emit a chunk of body bytes from inside a `Stream` producer.
-///
-/// Returns `Ok(Nil)` when the chunk is written, or `Error(Nil)` when the
-/// underlying socket write fails (for example, the upstream proxy has
-/// disconnected).
-pub fn send_chunk(sender: StreamSender, data: BytesTree) -> Result(Nil, Nil) {
-  let StreamSender(socket:, request_id:) = sender
-  send_if_nonempty(socket, handler.encode_stdout_chunk(request_id, data))
 }
 
 /// Build an in-memory response body. The whole `BytesTree` is sent in
@@ -273,8 +263,15 @@ pub fn stream(producer: fn(StreamSender) -> Nil) -> ResponseData {
   Stream(producer:)
 }
 
-type ServerHandler =
-  fn(Request(Nil), Context, BodyReader) -> Response(ResponseData)
+/// Emit a chunk of body bytes from inside a `Stream` producer.
+///
+/// Returns `Ok(Nil)` when the chunk is written, or `Error(Nil)` when the
+/// underlying socket write fails (for example, the upstream proxy has
+/// disconnected).
+pub fn send_chunk(sender: StreamSender, data: BytesTree) -> Result(Nil, Nil) {
+  let StreamSender(socket:, request_id:) = sender
+  send_if_nonempty(socket, handler.encode_stdout_chunk(request_id, data))
+}
 
 /// Why the listener could not start.
 pub type StartError {
@@ -360,6 +357,98 @@ pub fn supervised(
   })
 }
 
+type ServerHandler =
+  fn(Request(Nil), Context, BodyReader) -> Response(ResponseData)
+
+fn listen_on_address(address: Address) -> Result(Socket, StartError) {
+  case address {
+    PathAddress(path) ->
+      do_listen_unix(path)
+      |> result.map_error(fn(error) {
+        case error {
+          PathExists(path) ->
+            ListenerError("socket path already exists: " <> path)
+          _ ->
+            ListenerError("listen failed: " <> describe_transport_error(error))
+        }
+      })
+    TcpAddress(host, port) ->
+      do_listen_tcp(host, port)
+      |> result.map_error(fn(error) {
+        case error {
+          InvalidHost(host) ->
+            ListenerError("host must be a numeric IP literal: " <> host)
+          _ ->
+            ListenerError("listen failed: " <> describe_transport_error(error))
+        }
+      })
+  }
+}
+
+fn build_supervisor(
+  address: Address,
+  socket: Socket,
+  factory_name: process.Name(
+    factory_supervisor.Message(Worker, process.Subject(Nil)),
+  ),
+  max_body_size: Int,
+  body_read_timeout_ms: Int,
+  handler: ServerHandler,
+) -> static_supervisor.Builder {
+  let supervisor = static_supervisor.new(static_supervisor.RestForOne)
+  let supervisor = case address {
+    PathAddress(path) ->
+      static_supervisor.add(supervisor, path_janitor_supervised(path))
+    TcpAddress(_, _) -> supervisor
+  }
+
+  supervisor
+  |> static_supervisor.add(connection_factory_supervised(factory_name))
+  |> static_supervisor.add(acceptor_supervised(
+    socket,
+    factory_name,
+    max_body_size,
+    body_read_timeout_ms,
+    handler,
+  ))
+}
+
+fn path_janitor_supervised(
+  path: String,
+) -> supervision.ChildSpecification(Nil) {
+  supervision.worker(fn() { start_path_janitor(path) })
+  |> supervision.restart(supervision.Transient)
+}
+
+fn start_path_janitor(path: String) -> actor.StartResult(Nil) {
+  actor.new_with_initialiser(1000, fn(_subject) {
+    process.trap_exits(True)
+    let selector =
+      process.new_selector()
+      |> process.select_trapped_exits(fn(_msg) { Nil })
+    actor.initialised(path)
+    |> actor.selecting(selector)
+    |> actor.returning(Nil)
+    |> Ok
+  })
+  |> actor.on_message(fn(path, _message) {
+    delete_path(path)
+    actor.stop()
+  })
+  |> actor.start
+}
+
+fn connection_factory_supervised(
+  name: process.Name(factory_supervisor.Message(Worker, process.Subject(Nil))),
+) -> supervision.ChildSpecification(
+  factory_supervisor.Supervisor(Worker, process.Subject(Nil)),
+) {
+  factory_supervisor.worker_child(start_connection)
+  |> factory_supervisor.named(name)
+  |> factory_supervisor.supervised
+  |> supervision.restart(supervision.Transient)
+}
+
 fn acceptor_supervised(
   socket: Socket,
   factory_name: process.Name(
@@ -384,6 +473,53 @@ fn acceptor_supervised(
     Ok(actor.Started(pid:, data: Nil))
   })
   |> supervision.restart(supervision.Transient)
+}
+
+fn start_supervisor(
+  builder: static_supervisor.Builder,
+  socket: Socket,
+  address: Address,
+) -> Result(actor.Started(static_supervisor.Supervisor), StartError) {
+  case static_supervisor.start(builder) {
+    Error(error) -> {
+      cleanup_socket(socket, address)
+      let reason = case error {
+        actor.InitTimeout -> "supervisor init timeout"
+        actor.InitFailed(reason) -> reason
+        actor.InitExited(_) -> "supervisor init exited"
+      }
+      Error(ListenerError(reason))
+    }
+    Ok(started) -> Ok(started)
+  }
+}
+
+fn cleanup_socket(socket: Socket, address: Address) -> Nil {
+  close_socket(socket)
+  case address {
+    PathAddress(path) -> delete_path(path)
+    TcpAddress(_, _) -> Nil
+  }
+}
+
+fn describe_address(address: Address) -> String {
+  case address {
+    PathAddress(path) -> "unix:" <> path
+    TcpAddress(host, port) -> {
+      let host = case string.contains(host, ":") {
+        True -> "[" <> host <> "]"
+        False -> host
+      }
+      host <> ":" <> int.to_string(port)
+    }
+  }
+}
+
+fn describe_transport_error(error: SocketError) -> String {
+  case error {
+    Posix(reason) -> atom.to_string(reason)
+    PathExists(_) | InvalidHost(_) -> "unexpected transport error"
+  }
 }
 
 fn accept_loop(
@@ -432,168 +568,6 @@ fn accept_loop(
   )
 }
 
-fn build_supervisor(
-  address: Address,
-  socket: Socket,
-  factory_name: process.Name(
-    factory_supervisor.Message(Worker, process.Subject(Nil)),
-  ),
-  max_body_size: Int,
-  body_read_timeout_ms: Int,
-  handler: ServerHandler,
-) -> static_supervisor.Builder {
-  let supervisor = static_supervisor.new(static_supervisor.RestForOne)
-  let supervisor = case address {
-    PathAddress(path) ->
-      static_supervisor.add(supervisor, path_janitor_supervised(path))
-    TcpAddress(_, _) -> supervisor
-  }
-
-  supervisor
-  |> static_supervisor.add(connection_factory_supervised(factory_name))
-  |> static_supervisor.add(acceptor_supervised(
-    socket,
-    factory_name,
-    max_body_size,
-    body_read_timeout_ms,
-    handler,
-  ))
-}
-
-fn cleanup_socket(socket: Socket, address: Address) -> Nil {
-  close_socket(socket)
-  case address {
-    PathAddress(path) -> delete_path(path)
-    TcpAddress(_, _) -> Nil
-  }
-}
-
-fn connection_factory_supervised(
-  name: process.Name(factory_supervisor.Message(Worker, process.Subject(Nil))),
-) -> supervision.ChildSpecification(
-  factory_supervisor.Supervisor(Worker, process.Subject(Nil)),
-) {
-  factory_supervisor.worker_child(start_connection)
-  |> factory_supervisor.named(name)
-  |> factory_supervisor.supervised
-  |> supervision.restart(supervision.Transient)
-}
-
-fn describe_address(address: Address) -> String {
-  case address {
-    PathAddress(path) -> "unix:" <> path
-    TcpAddress(host, port) -> {
-      let host = case string.contains(host, ":") {
-        True -> "[" <> host <> "]"
-        False -> host
-      }
-      host <> ":" <> int.to_string(port)
-    }
-  }
-}
-
-fn describe_transport_error(error: SocketError) -> String {
-  case error {
-    Posix(reason) -> atom.to_string(reason)
-    PathExists(_) | InvalidHost(_) -> "unexpected transport error"
-  }
-}
-
-fn listen_on_address(address: Address) -> Result(Socket, StartError) {
-  case address {
-    PathAddress(path) ->
-      do_listen_unix(path)
-      |> result.map_error(fn(error) {
-        case error {
-          PathExists(path) ->
-            ListenerError("socket path already exists: " <> path)
-          _ ->
-            ListenerError("listen failed: " <> describe_transport_error(error))
-        }
-      })
-    TcpAddress(host, port) ->
-      do_listen_tcp(host, port)
-      |> result.map_error(fn(error) {
-        case error {
-          InvalidHost(host) ->
-            ListenerError("host must be a numeric IP literal: " <> host)
-          _ ->
-            ListenerError("listen failed: " <> describe_transport_error(error))
-        }
-      })
-  }
-}
-
-fn path_janitor_supervised(
-  path: String,
-) -> supervision.ChildSpecification(Nil) {
-  supervision.worker(fn() { start_path_janitor(path) })
-  |> supervision.restart(supervision.Transient)
-}
-
-fn start_path_janitor(path: String) -> actor.StartResult(Nil) {
-  actor.new_with_initialiser(1000, fn(_subject) {
-    process.trap_exits(True)
-    let selector =
-      process.new_selector()
-      |> process.select_trapped_exits(fn(_msg) { Nil })
-    actor.initialised(path)
-    |> actor.selecting(selector)
-    |> actor.returning(Nil)
-    |> Ok
-  })
-  |> actor.on_message(fn(path, _message) {
-    delete_path(path)
-    actor.stop()
-  })
-  |> actor.start
-}
-
-fn start_supervisor(
-  builder: static_supervisor.Builder,
-  socket: Socket,
-  address: Address,
-) -> Result(actor.Started(static_supervisor.Supervisor), StartError) {
-  case static_supervisor.start(builder) {
-    Error(error) -> {
-      cleanup_socket(socket, address)
-      let reason = case error {
-        actor.InitTimeout -> "supervisor init timeout"
-        actor.InitFailed(reason) -> reason
-        actor.InitExited(_) -> "supervisor init exited"
-      }
-      Error(ListenerError(reason))
-    }
-    Ok(started) -> Ok(started)
-  }
-}
-
-type NextRequest {
-  Ready(
-    state: handler.State,
-    request_id: Int,
-    params: BitArray,
-    remaining_events: List(handler.Event),
-    keep_conn: Bool,
-  )
-  Closed
-}
-
-@internal
-pub type RequestError {
-  MissingMethod
-  InvalidMethod(method: String)
-}
-
-type Worker {
-  Worker(
-    socket: Socket,
-    max_body_size: Int,
-    body_read_timeout_ms: Int,
-    handler: ServerHandler,
-  )
-}
-
 fn start_connection(worker: Worker) -> actor.StartResult(process.Subject(Nil)) {
   let report_back = process.new_subject()
   let pid =
@@ -619,6 +593,26 @@ fn start_connection(worker: Worker) -> actor.StartResult(process.Subject(Nil)) {
   }
 }
 
+type Worker {
+  Worker(
+    socket: Socket,
+    max_body_size: Int,
+    body_read_timeout_ms: Int,
+    handler: ServerHandler,
+  )
+}
+
+type NextRequest {
+  Ready(
+    state: handler.State,
+    request_id: Int,
+    params: BitArray,
+    remaining_events: List(handler.Event),
+    keep_conn: Bool,
+  )
+  Closed
+}
+
 fn run_connection_loop(worker: Worker, state: handler.State) -> Nil {
   case next_request(worker, state, <<>>) {
     Closed -> Nil
@@ -627,13 +621,12 @@ fn run_connection_loop(worker: Worker, state: handler.State) -> Nil {
         process_request(worker, state, request_id, params, remaining_events)
       {
         Error(_) -> Nil
-        Ok(snapshots) ->
-          continue_after_request(worker, state, keep_conn, snapshots)
+        Ok(snapshots) -> resume_connection(worker, state, keep_conn, snapshots)
       }
   }
 }
 
-fn continue_after_request(
+fn resume_connection(
   worker: Worker,
   state: handler.State,
   keep_conn: Bool,
@@ -648,6 +641,110 @@ fn continue_after_request(
         Ok(next_state) -> run_connection_loop(worker, next_state)
       }
   }
+}
+
+fn next_request(
+  worker: Worker,
+  state: handler.State,
+  pending: BitArray,
+) -> NextRequest {
+  let buffered = case state {
+    handler.Idle(buf) -> buf
+    handler.Receiving(recv) -> recv.buffer
+  }
+  use <- bool.lazy_guard(
+    when: bit_array.byte_size(pending) == 0
+      && bit_array.byte_size(buffered) == 0,
+    return: fn() { wait_for_bytes(worker, state) },
+  )
+  let outcome =
+    handler.step(state, bytes: pending, max_body_size: worker.max_body_size)
+  let _ = send_if_nonempty(worker.socket, outcome.outgoing)
+  case outcome.events {
+    [handler.Start(request_id, params, keep_conn), ..rest] ->
+      Ready(
+        state: outcome.state,
+        request_id:,
+        params:,
+        remaining_events: rest,
+        keep_conn:,
+      )
+    _ ->
+      case outcome.continuation {
+        handler.CloseConnection -> Closed
+        handler.WaitForMore -> wait_for_bytes(worker, outcome.state)
+      }
+  }
+}
+
+fn wait_for_bytes(worker: Worker, state: handler.State) -> NextRequest {
+  case recv(worker.socket, 0, worker.body_read_timeout_ms) {
+    Error(_) -> Closed
+    Ok(<<>>) -> Closed
+    Ok(more) -> next_request(worker, state, more)
+  }
+}
+
+fn process_request(
+  worker: Worker,
+  state: handler.State,
+  request_id: Int,
+  params: BitArray,
+  events: List(handler.Event),
+) -> Result(Option(process.Subject(BodySnapshot)), Nil) {
+  use <- bool.lazy_guard(
+    when: list.contains(events, handler.BodyTooLarge),
+    return: fn() {
+      logging.log(
+        logging.Warning,
+        "rejecting request: body exceeded max_body_size of "
+          <> int.to_string(worker.max_body_size)
+          <> " bytes",
+      )
+      let _ =
+        send_if_nonempty(
+          worker.socket,
+          handler.encode_overloaded_end(request_id),
+        )
+      Error(Nil)
+    },
+  )
+
+  case parse_params(params) {
+    Error(message) -> {
+      logging.log(logging.Warning, "rejecting request: " <> message)
+      let response = error_response(400, message)
+      send_response(worker.socket, request_id, response)
+      |> result.replace(option.None)
+    }
+    Ok(#(req, cgi)) -> {
+      let #(reader, snapshots) = build_body_reader(worker, state, events)
+      let response = run_user_handler(worker.handler, req, cgi, reader)
+      send_response(worker.socket, request_id, response)
+      |> result.replace(snapshots)
+    }
+  }
+}
+
+fn parse_params(params: BitArray) -> Result(#(Request(Nil), Context), String) {
+  case protocol.parse_name_value_pairs(params) {
+    Error(_) -> Error("malformed FastCGI parameters")
+    Ok(pairs) ->
+      to_http_request(pairs, Nil)
+      |> result.map_error(request_error_message)
+  }
+}
+
+fn error_response(status: Int, message: String) -> Response(ResponseData) {
+  response.new(status)
+  |> response.set_header("content-type", "text/plain; charset=utf-8")
+  |> response.set_body(Bytes(bytes_tree.from_string(message)))
+}
+
+@internal
+pub type RequestError {
+  MissingMethod
+  InvalidMethod(method: String)
 }
 
 type PartialRequest {
@@ -692,48 +789,6 @@ pub fn to_http_request(
       ),
     )
   fold_pairs_loop(pairs, initial, body)
-}
-
-fn next_request(
-  worker: Worker,
-  state: handler.State,
-  pending: BitArray,
-) -> NextRequest {
-  let buffered = case state {
-    handler.Idle(buf) -> buf
-    handler.Receiving(recv) -> recv.buffer
-  }
-  use <- bool.lazy_guard(
-    when: bit_array.byte_size(pending) == 0
-      && bit_array.byte_size(buffered) == 0,
-    return: fn() { wait_for_bytes(worker, state) },
-  )
-  let outcome =
-    handler.step(state, bytes: pending, max_body_size: worker.max_body_size)
-  let _ = send_if_nonempty(worker.socket, outcome.outgoing)
-  case outcome.events {
-    [handler.Start(request_id, params, keep_conn), ..rest] ->
-      Ready(
-        state: outcome.state,
-        request_id:,
-        params:,
-        remaining_events: rest,
-        keep_conn:,
-      )
-    _ ->
-      case outcome.continuation {
-        handler.CloseConnection -> Closed
-        handler.WaitForMore -> wait_for_bytes(worker, outcome.state)
-      }
-  }
-}
-
-fn wait_for_bytes(worker: Worker, state: handler.State) -> NextRequest {
-  case recv(worker.socket, 0, worker.body_read_timeout_ms) {
-    Error(_) -> Closed
-    Ok(<<>>) -> Closed
-    Ok(more) -> next_request(worker, state, more)
-  }
 }
 
 fn fold_pairs_loop(
@@ -833,53 +888,6 @@ fn finalize_request(
   Ok(#(req, acc.ctx))
 }
 
-fn error_response(status: Int, message: String) -> Response(ResponseData) {
-  response.new(status)
-  |> response.set_header("content-type", "text/plain; charset=utf-8")
-  |> response.set_body(Bytes(bytes_tree.from_string(message)))
-}
-
-fn process_request(
-  worker: Worker,
-  state: handler.State,
-  request_id: Int,
-  params: BitArray,
-  events: List(handler.Event),
-) -> Result(Option(process.Subject(BodySnapshot)), Nil) {
-  use <- bool.lazy_guard(
-    when: list.contains(events, handler.BodyTooLarge),
-    return: fn() {
-      logging.log(
-        logging.Warning,
-        "rejecting request: body exceeded max_body_size of "
-          <> int.to_string(worker.max_body_size)
-          <> " bytes",
-      )
-      let _ =
-        send_if_nonempty(
-          worker.socket,
-          handler.encode_overloaded_end(request_id),
-        )
-      Error(Nil)
-    },
-  )
-
-  case parse_params(params) {
-    Error(message) -> {
-      logging.log(logging.Warning, "rejecting request: " <> message)
-      let response = error_response(400, message)
-      send_response(worker.socket, request_id, response)
-      |> result.replace(option.None)
-    }
-    Ok(#(req, cgi)) -> {
-      let #(reader, snapshots) = build_body_reader(worker, state, events)
-      let response = run_user_handler(worker.handler, req, cgi, reader)
-      send_response(worker.socket, request_id, response)
-      |> result.replace(snapshots)
-    }
-  }
-}
-
 fn https_scheme_from_value(value: String) -> http.Scheme {
   case string.lowercase(value) {
     "" | "off" -> http.Http
@@ -887,19 +895,15 @@ fn https_scheme_from_value(value: String) -> http.Scheme {
   }
 }
 
-fn parse_params(params: BitArray) -> Result(#(Request(Nil), Context), String) {
-  case protocol.parse_name_value_pairs(params) {
-    Error(_) -> Error("malformed FastCGI parameters")
-    Ok(pairs) ->
-      to_http_request(pairs, Nil)
-      |> result.map_error(request_error_message)
-  }
-}
-
-fn request_error_message(error: RequestError) -> String {
-  case error {
-    MissingMethod -> "missing REQUEST_METHOD parameter"
-    InvalidMethod(method) -> "invalid REQUEST_METHOD: " <> method
+fn resolve_http_host(
+  raw: String,
+  server_name: String,
+  server_port: Option(Int),
+) -> #(String, Option(Int)) {
+  use <- bool.guard(when: raw == "", return: #(server_name, server_port))
+  case string.starts_with(raw, "[") {
+    True -> resolve_bracketed_host(raw, server_port)
+    False -> resolve_unbracketed_host(raw, server_port)
   }
 }
 
@@ -917,18 +921,6 @@ fn resolve_bracketed_host(
   }
 }
 
-fn resolve_http_host(
-  raw: String,
-  server_name: String,
-  server_port: Option(Int),
-) -> #(String, Option(Int)) {
-  use <- bool.guard(when: raw == "", return: #(server_name, server_port))
-  case string.starts_with(raw, "[") {
-    True -> resolve_bracketed_host(raw, server_port)
-    False -> resolve_unbracketed_host(raw, server_port)
-  }
-}
-
 fn resolve_unbracketed_host(
   raw: String,
   server_port: Option(Int),
@@ -941,6 +933,13 @@ fn resolve_unbracketed_host(
       #(host, option.or(port, server_port))
     }
     _ -> #(raw, server_port)
+  }
+}
+
+fn request_error_message(error: RequestError) -> String {
+  case error {
+    MissingMethod -> "missing REQUEST_METHOD parameter"
+    InvalidMethod(method) -> "invalid REQUEST_METHOD: " <> method
   }
 }
 
@@ -960,29 +959,6 @@ fn run_user_handler(
       error_response(500, "internal server error")
     }
   }
-}
-
-fn send_file_body(
-  socket: Socket,
-  request_id: Int,
-  handle: Handle,
-  offset: Int,
-  length: Int,
-) -> Result(Nil, Nil) {
-  use <- exception.defer(fn() { close_file(handle) })
-  send_via_sendfile(socket, request_id, handle, offset, length)
-}
-
-fn send_if_nonempty(socket: Socket, bytes: BytesTree) -> Result(Nil, Nil) {
-  case bytes_tree.byte_size(bytes) {
-    0 -> Ok(Nil)
-    _ -> send_tree(socket, bytes)
-  }
-}
-
-fn send_padding(socket: Socket, padding_length: Int) -> Result(Nil, Nil) {
-  use <- bool.guard(when: padding_length == 0, return: Ok(Nil))
-  send_bits(socket, <<0:size({ padding_length * 8 })>>)
 }
 
 fn send_response(
@@ -1028,6 +1004,17 @@ fn send_response(
   }
 }
 
+fn send_file_body(
+  socket: Socket,
+  request_id: Int,
+  handle: Handle,
+  offset: Int,
+  length: Int,
+) -> Result(Nil, Nil) {
+  use <- exception.defer(fn() { close_file(handle) })
+  send_via_sendfile(socket, request_id, handle, offset, length)
+}
+
 fn send_via_sendfile(
   socket: Socket,
   request_id: Int,
@@ -1067,6 +1054,18 @@ fn drain_sendfile_loop(
   }
 }
 
+fn send_padding(socket: Socket, padding_length: Int) -> Result(Nil, Nil) {
+  use <- bool.guard(when: padding_length == 0, return: Ok(Nil))
+  send_bits(socket, <<0:size({ padding_length * 8 })>>)
+}
+
+fn send_if_nonempty(socket: Socket, bytes: BytesTree) -> Result(Nil, Nil) {
+  case bytes_tree.byte_size(bytes) {
+    0 -> Ok(Nil)
+    _ -> send_tree(socket, bytes)
+  }
+}
+
 type BodyContext {
   BodyContext(
     state: handler.State,
@@ -1074,20 +1073,12 @@ type BodyContext {
     finished: Bool,
     overflowed: Bool,
     worker: Worker,
-    snapshots: Option(process.Subject(BodySnapshot)),
+    snapshots: process.Subject(BodySnapshot),
   )
 }
 
 type BodySnapshot {
   BodySnapshot(state: handler.State, finished: Bool, overflowed: Bool)
-}
-
-fn buffered_reader(data: BitArray, overflowed: Bool) -> BodyReader {
-  case overflowed, bit_array.byte_size(data) {
-    True, _ -> fn() { Error(BodyTooLarge) }
-    False, 0 -> fn() { Ok(End) }
-    False, _ -> fn() { Ok(Chunk(data, fn() { Ok(End) })) }
-  }
 }
 
 fn build_body_reader(
@@ -1111,9 +1102,9 @@ fn build_body_reader(
           finished: False,
           overflowed: False,
           worker:,
-          snapshots: option.Some(subject),
+          snapshots: subject,
         )
-      #(fn() { read_step(ctx) }, option.Some(subject))
+      #(fn() { next_read(ctx) }, option.Some(subject))
     }
   }
 }
@@ -1146,42 +1137,34 @@ fn collect_body_events_loop(
   }
 }
 
+fn buffered_reader(data: BitArray, overflowed: Bool) -> BodyReader {
+  case overflowed, bit_array.byte_size(data) {
+    True, _ -> fn() { Error(BodyTooLarge) }
+    False, 0 -> fn() { Ok(End) }
+    False, _ -> fn() { Ok(Chunk(data, fn() { Ok(End) })) }
+  }
+}
+
+fn next_read(ctx: BodyContext) -> Result(Read, ReadError) {
+  use <- bool.guard(when: ctx.overflowed, return: Error(BodyTooLarge))
+  case bit_array.byte_size(ctx.pending), ctx.finished {
+    0, True -> Ok(End)
+    0, False -> pull_more(ctx)
+    _, _ -> deliver_pending(ctx)
+  }
+}
+
 fn deliver_pending(ctx: BodyContext) -> Result(Read, ReadError) {
   let next_ctx = BodyContext(..ctx, pending: <<>>)
-  send_snapshot(next_ctx)
-  Ok(Chunk(data: ctx.pending, consume: fn() { read_step(next_ctx) }))
-}
-
-fn drain_body_loop(
-  snap: BodySnapshot,
-  worker: Worker,
-) -> Result(handler.State, Nil) {
-  use <- bool.guard(when: snap.overflowed, return: Error(Nil))
-  use <- bool.guard(when: snap.finished, return: Ok(snap.state))
-  case step_with_socket(snap, worker) {
-    Error(_) -> Error(Nil)
-    Ok(#(_data, next)) -> drain_body_loop(next, worker)
-  }
-}
-
-fn drain_unread_body(
-  worker: Worker,
-  subject: process.Subject(BodySnapshot),
-) -> Result(handler.State, Nil) {
-  case process.receive(subject, 0) {
-    Error(_) -> Error(Nil)
-    Ok(first) -> drain_body_loop(latest_snapshot_loop(subject, first), worker)
-  }
-}
-
-fn latest_snapshot_loop(
-  subject: process.Subject(BodySnapshot),
-  latest: BodySnapshot,
-) -> BodySnapshot {
-  case process.receive(subject, 0) {
-    Error(_) -> latest
-    Ok(snap) -> latest_snapshot_loop(subject, snap)
-  }
+  process.send(
+    next_ctx.snapshots,
+    BodySnapshot(
+      state: next_ctx.state,
+      finished: next_ctx.finished,
+      overflowed: next_ctx.overflowed,
+    ),
+  )
+  Ok(Chunk(data: ctx.pending, consume: fn() { next_read(next_ctx) }))
 }
 
 fn pull_more(ctx: BodyContext) -> Result(Read, ReadError) {
@@ -1191,7 +1174,7 @@ fn pull_more(ctx: BodyContext) -> Result(Read, ReadError) {
       finished: ctx.finished,
       overflowed: ctx.overflowed,
     )
-  use #(new_data, next) <- result.try(step_with_socket(prior, ctx.worker))
+  use #(new_data, next) <- result.try(recv_and_step(prior, ctx.worker))
   let next_ctx =
     BodyContext(
       ..ctx,
@@ -1200,42 +1183,18 @@ fn pull_more(ctx: BodyContext) -> Result(Read, ReadError) {
       finished: next.finished,
       overflowed: next.overflowed,
     )
-  send_snapshot(next_ctx)
-  read_step(next_ctx)
+  process.send(next_ctx.snapshots, next)
+  next_read(next_ctx)
 }
 
-fn read_step(ctx: BodyContext) -> Result(Read, ReadError) {
-  use <- bool.guard(when: ctx.overflowed, return: Error(BodyTooLarge))
-  case bit_array.byte_size(ctx.pending), ctx.finished {
-    0, True -> Ok(End)
-    0, False -> pull_more(ctx)
-    _, _ -> deliver_pending(ctx)
-  }
-}
-
-fn send_snapshot(ctx: BodyContext) -> Nil {
-  case ctx.snapshots {
-    option.None -> Nil
-    option.Some(subject) ->
-      process.send(
-        subject,
-        BodySnapshot(
-          state: ctx.state,
-          finished: ctx.finished,
-          overflowed: ctx.overflowed,
-        ),
-      )
-  }
-}
-
-fn step_with_socket(
+fn recv_and_step(
   prior: BodySnapshot,
   worker: Worker,
 ) -> Result(#(BitArray, BodySnapshot), ReadError) {
   use more <- result.try(worker_recv(worker))
   let outcome =
     handler.step(prior.state, bytes: more, max_body_size: worker.max_body_size)
-  worker_send(worker, outcome.outgoing)
+  let _ = send_if_nonempty(worker.socket, outcome.outgoing)
   let #(data, ended, overflowed) = collect_body_events(outcome.events)
   let snapshot =
     BodySnapshot(
@@ -1259,9 +1218,36 @@ fn worker_recv(worker: Worker) -> Result(BitArray, ReadError) {
   }
 }
 
-fn worker_send(worker: Worker, bytes: BytesTree) -> Nil {
-  let _ = send_if_nonempty(worker.socket, bytes)
-  Nil
+fn drain_unread_body(
+  worker: Worker,
+  subject: process.Subject(BodySnapshot),
+) -> Result(handler.State, Nil) {
+  case process.receive(subject, 0) {
+    Error(_) -> Error(Nil)
+    Ok(first) -> drain_body_loop(latest_snapshot_loop(subject, first), worker)
+  }
+}
+
+fn latest_snapshot_loop(
+  subject: process.Subject(BodySnapshot),
+  latest: BodySnapshot,
+) -> BodySnapshot {
+  case process.receive(subject, 0) {
+    Error(_) -> latest
+    Ok(snap) -> latest_snapshot_loop(subject, snap)
+  }
+}
+
+fn drain_body_loop(
+  snap: BodySnapshot,
+  worker: Worker,
+) -> Result(handler.State, Nil) {
+  use <- bool.guard(when: snap.overflowed, return: Error(Nil))
+  use <- bool.guard(when: snap.finished, return: Ok(snap.state))
+  case recv_and_step(snap, worker) {
+    Error(_) -> Error(Nil)
+    Ok(#(_data, next)) -> drain_body_loop(next, worker)
+  }
 }
 
 type Handle
@@ -1277,12 +1263,6 @@ type SocketError {
 @external(erlang, "gen_tcp", "accept")
 fn accept(listen: Socket) -> Result(Socket, Atom)
 
-@external(erlang, "fcgi_ffi", "listen_tcp")
-fn do_listen_tcp(host: String, port: Int) -> Result(Socket, SocketError)
-
-@external(erlang, "fcgi_ffi", "listen_unix")
-fn do_listen_unix(path: String) -> Result(Socket, SocketError)
-
 @external(erlang, "fcgi_ffi", "close_file")
 fn close_file(handle: Handle) -> Nil
 
@@ -1297,6 +1277,12 @@ fn controlling_process(
 
 @external(erlang, "fcgi_ffi", "delete_path")
 fn delete_path(path: String) -> Nil
+
+@external(erlang, "fcgi_ffi", "listen_tcp")
+fn do_listen_tcp(host: String, port: Int) -> Result(Socket, SocketError)
+
+@external(erlang, "fcgi_ffi", "listen_unix")
+fn do_listen_unix(path: String) -> Result(Socket, SocketError)
 
 @external(erlang, "fcgi_ffi", "open_and_size")
 fn open_and_size(path: String) -> Result(#(Handle, Int), FileError)
