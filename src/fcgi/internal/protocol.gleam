@@ -112,10 +112,6 @@ fn encode_length(n: Int) -> BitArray {
   }
 }
 
-pub fn encode_stdout_record(request_id: Int, body: BytesTree) -> BytesTree {
-  frame_tree(6, request_id, body)
-}
-
 pub fn encode_stdout_frame_header(
   request_id: Int,
   content_length: Int,

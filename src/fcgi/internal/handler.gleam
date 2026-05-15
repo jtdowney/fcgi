@@ -455,7 +455,7 @@ pub fn encode_stdout_chunk(request_id: Int, payload: BytesTree) -> BytesTree {
   let size = bytes_tree.byte_size(payload)
   use <- bool.guard(when: size == 0, return: bytes_tree.new())
   case size <= protocol.max_record_content_size {
-    True -> protocol.encode_stdout_record(request_id, payload)
+    True -> protocol.frame_tree(6, request_id, payload)
     False ->
       encode_records(protocol.chunk_stdout(
         request_id,
