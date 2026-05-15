@@ -600,29 +600,25 @@ pub fn request_body_is_passed_through_to_handler_test() {
 pub fn request_body_is_streamed_chunk_by_chunk_test() {
   use path <- helpers.with_temp_socket_path
   let begin =
-    protocol.encode_incoming(protocol.BeginRequest(
+    helpers.encode_incoming(protocol.BeginRequest(
       request_id: 1,
       role: protocol.responder_role,
       keep_conn: False,
     ))
   let real_params =
-    protocol.encode_incoming(protocol.Params(
+    helpers.encode_incoming(protocol.Params(
       request_id: 1,
       data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
         |> bytes_tree.to_bit_array,
     ))
   let params_end =
-    protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
   let stdin_one =
-    protocol.encode_incoming(
-      protocol.Stdin(request_id: 1, data: <<"AAA":utf8>>),
-    )
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<"AAA":utf8>>))
   let stdin_two =
-    protocol.encode_incoming(
-      protocol.Stdin(request_id: 1, data: <<"BBB":utf8>>),
-    )
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<"BBB":utf8>>))
   let stdin_end =
-    protocol.encode_incoming(protocol.Stdin(request_id: 1, data: <<>>))
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<>>))
 
   let signal = process.new_subject()
   let handler = fn(req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
@@ -665,19 +661,19 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
 pub fn builder_body_read_timeout_surfaces_to_body_reader_test() {
   use path <- helpers.with_temp_socket_path
   let begin =
-    protocol.encode_incoming(protocol.BeginRequest(
+    helpers.encode_incoming(protocol.BeginRequest(
       request_id: 1,
       role: protocol.responder_role,
       keep_conn: False,
     ))
   let real_params =
-    protocol.encode_incoming(protocol.Params(
+    helpers.encode_incoming(protocol.Params(
       request_id: 1,
       data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
         |> bytes_tree.to_bit_array,
     ))
   let params_end =
-    protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
 
   let handler = fn(req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
     let body = case req.body() {
@@ -717,23 +713,21 @@ pub fn builder_body_read_timeout_surfaces_to_body_reader_test() {
 pub fn body_reader_returns_client_disconnected_when_peer_closes_test() {
   use path <- helpers.with_temp_socket_path
   let begin =
-    protocol.encode_incoming(protocol.BeginRequest(
+    helpers.encode_incoming(protocol.BeginRequest(
       request_id: 1,
       role: protocol.responder_role,
       keep_conn: False,
     ))
   let real_params =
-    protocol.encode_incoming(protocol.Params(
+    helpers.encode_incoming(protocol.Params(
       request_id: 1,
       data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
         |> bytes_tree.to_bit_array,
     ))
   let params_end =
-    protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
   let stdin_partial =
-    protocol.encode_incoming(
-      protocol.Stdin(request_id: 1, data: <<"AAA":utf8>>),
-    )
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<"AAA":utf8>>))
 
   let signal = process.new_subject()
   let handler = fn(req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
@@ -971,17 +965,17 @@ pub fn missing_request_method_returns_400_test() {
 
 pub fn malformed_params_returns_400_test() {
   let begin =
-    protocol.encode_incoming(protocol.BeginRequest(
+    helpers.encode_incoming(protocol.BeginRequest(
       request_id: 1,
       role: protocol.responder_role,
       keep_conn: False,
     ))
   let bad_params =
-    protocol.encode_incoming(protocol.Params(request_id: 1, data: <<0xFF>>))
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: <<0xFF>>))
   let params_end =
-    protocol.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
   let stdin_end =
-    protocol.encode_incoming(protocol.Stdin(request_id: 1, data: <<>>))
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<>>))
   let request_bytes = <<
     begin:bits,
     bad_params:bits,

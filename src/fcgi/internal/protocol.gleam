@@ -53,29 +53,6 @@ fn chunk_stdout_loop(
   chunk_stdout_loop(request_id, tail, [Stdout(request_id, head), ..acc])
 }
 
-pub fn encode_incoming(record: Incoming) -> BitArray {
-  let tree = case record {
-    BeginRequest(id, role, keep_conn) -> {
-      let flags = case keep_conn {
-        True -> 1
-        False -> 0
-      }
-      let body = <<role:size(16), flags:size(8), 0:size(40)>>
-      frame_bits(1, id, body)
-    }
-    AbortRequest(id) -> frame_bits(2, id, <<>>)
-    Params(id, data) -> frame_bits(4, id, data)
-    Stdin(id, data) -> frame_bits(5, id, data)
-    GetValues(names) -> {
-      let pairs = list.map(names, fn(name) { #(name, "") })
-      frame_tree(9, 0, encode_name_value_pairs(pairs))
-    }
-    IncomingUnknown(id, type_byte) -> frame_bits(type_byte, id, <<>>)
-  }
-
-  bytes_tree.to_bit_array(tree)
-}
-
 pub fn encode_name_value_pairs(pairs: List(#(String, String))) -> BytesTree {
   list.fold(pairs, bytes_tree.new(), fn(acc, pair) {
     let #(name, value) = pair
@@ -145,11 +122,19 @@ fn encode_length(n: Int) -> BitArray {
   }
 }
 
-fn frame_bits(record_type: Int, request_id: Int, body: BitArray) -> BytesTree {
+pub fn frame_bits(
+  record_type: Int,
+  request_id: Int,
+  body: BitArray,
+) -> BytesTree {
   frame_tree(record_type, request_id, bytes_tree.from_bit_array(body))
 }
 
-fn frame_tree(record_type: Int, request_id: Int, body: BytesTree) -> BytesTree {
+pub fn frame_tree(
+  record_type: Int,
+  request_id: Int,
+  body: BytesTree,
+) -> BytesTree {
   let content_length = bytes_tree.byte_size(body)
   let padding_length = padding_for(content_length)
   let header = <<

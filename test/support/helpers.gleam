@@ -26,6 +26,30 @@ pub fn with_temp_file(fun: fn(String) -> a) -> a {
   value
 }
 
+pub fn encode_incoming(record: protocol.Incoming) -> BitArray {
+  let tree = case record {
+    protocol.BeginRequest(id, role, keep_conn) -> {
+      let flags = case keep_conn {
+        True -> 1
+        False -> 0
+      }
+      let body = <<role:size(16), flags:size(8), 0:size(40)>>
+      protocol.frame_bits(1, id, body)
+    }
+    protocol.AbortRequest(id) -> protocol.frame_bits(2, id, <<>>)
+    protocol.Params(id, data) -> protocol.frame_bits(4, id, data)
+    protocol.Stdin(id, data) -> protocol.frame_bits(5, id, data)
+    protocol.GetValues(names) -> {
+      let pairs = list.map(names, fn(name) { #(name, "") })
+      protocol.frame_tree(9, 0, protocol.encode_name_value_pairs(pairs))
+    }
+    protocol.IncomingUnknown(id, type_byte) ->
+      protocol.frame_bits(type_byte, id, <<>>)
+  }
+
+  bytes_tree.to_bit_array(tree)
+}
+
 pub fn request_stream_bytes(
   request_id request_id: Int,
   params params: List(#(String, String)),
@@ -33,7 +57,7 @@ pub fn request_stream_bytes(
   keep_conn keep_conn: Bool,
 ) -> BitArray {
   let begin =
-    protocol.encode_incoming(protocol.BeginRequest(
+    encode_incoming(protocol.BeginRequest(
       request_id:,
       role: protocol.responder_role,
       keep_conn:,
@@ -42,12 +66,10 @@ pub fn request_stream_bytes(
     protocol.encode_name_value_pairs(params)
     |> bytes_tree.to_bit_array
   let params_record =
-    protocol.encode_incoming(protocol.Params(request_id:, data: params_data))
-  let params_end =
-    protocol.encode_incoming(protocol.Params(request_id:, data: <<>>))
-  let stdin = protocol.encode_incoming(protocol.Stdin(request_id:, data: body))
-  let stdin_end =
-    protocol.encode_incoming(protocol.Stdin(request_id:, data: <<>>))
+    encode_incoming(protocol.Params(request_id:, data: params_data))
+  let params_end = encode_incoming(protocol.Params(request_id:, data: <<>>))
+  let stdin = encode_incoming(protocol.Stdin(request_id:, data: body))
+  let stdin_end = encode_incoming(protocol.Stdin(request_id:, data: <<>>))
   <<
     begin:bits,
     params_record:bits,

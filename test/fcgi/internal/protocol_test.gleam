@@ -152,7 +152,7 @@ pub fn incoming_fixed_size_records_round_trip_test() {
     qcheck.default_config() |> qcheck.with_test_count(100),
     incoming_fixed_size_record_generator(),
   )
-  let bytes = protocol.encode_incoming(record)
+  let bytes = helpers.encode_incoming(record)
   let assert protocol.Parsed(parsed, rest) = protocol.parse_record(bytes)
   assert parsed == record
   assert rest == <<>>
@@ -185,7 +185,7 @@ pub fn incoming_data_records_round_trip_test() {
     qcheck.default_config() |> qcheck.with_test_count(100),
     incoming_data_record_generator(),
   )
-  let bytes = protocol.encode_incoming(record)
+  let bytes = helpers.encode_incoming(record)
   let assert protocol.Parsed(parsed, rest) = protocol.parse_record(bytes)
   assert parsed == record
   assert rest == <<>>
@@ -223,11 +223,11 @@ pub fn chunk_stdout_records_round_trip_test() {
 
 pub fn parse_record_skips_padding_to_next_record_test() {
   let stdin_record =
-    protocol.encode_incoming(
+    helpers.encode_incoming(
       protocol.Stdin(request_id: 1, data: <<"hello":utf8>>),
     )
   let abort_record =
-    protocol.encode_incoming(protocol.AbortRequest(request_id: 2))
+    helpers.encode_incoming(protocol.AbortRequest(request_id: 2))
   let bytes = <<stdin_record:bits, abort_record:bits>>
 
   let assert protocol.Parsed(parsed, rest) = protocol.parse_record(bytes)
@@ -237,7 +237,7 @@ pub fn parse_record_skips_padding_to_next_record_test() {
 
 pub fn parse_record_returns_trailing_bytes_as_rest_test() {
   let stdin_record =
-    protocol.encode_incoming(protocol.Stdin(request_id: 1, data: <<"hi":utf8>>))
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<"hi":utf8>>))
   let trailing = <<0xAA, 0xBB, 0xCC>>
   let bytes = <<stdin_record:bits, trailing:bits>>
 

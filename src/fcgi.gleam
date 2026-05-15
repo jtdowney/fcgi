@@ -213,17 +213,13 @@ pub type FileError {
   InvalidRange(offset: Int, limit: Option(Int))
 }
 
-@internal
-pub type InternalResponseData {
+/// What the server should send back as a response body. Construct with
+/// `bytes`, `send_file`, or `stream`.
+pub opaque type ResponseData {
   Bytes(content: BytesTree)
   File(handle: Handle, offset: Int, length: Int)
   Stream(producer: fn(StreamSender) -> Nil)
 }
-
-/// What the server should send back as a response body. Construct with
-/// `bytes`, `send_file`, or `stream`.
-pub type ResponseData =
-  InternalResponseData
 
 /// Use `send_chunk` to emit body bytes; each call writes one or more FastCGI
 /// `STDOUT` records on the open connection.
@@ -1082,8 +1078,7 @@ type BodyContext {
   )
 }
 
-@internal
-pub type BodySnapshot {
+type BodySnapshot {
   BodySnapshot(state: handler.State, finished: Bool, overflowed: Bool)
 }
 
@@ -1269,8 +1264,7 @@ fn worker_send(worker: Worker, bytes: BytesTree) -> Nil {
   Nil
 }
 
-@internal
-pub type Handle
+type Handle
 
 type Socket
 
