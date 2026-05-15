@@ -774,9 +774,9 @@ pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
   use path <- helpers.with_temp_socket_path
   let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
     let producer = fn(sender) {
-      let _ = fcgi.send_chunk(sender, <<"first":utf8>>)
-      let _ = fcgi.send_chunk(sender, <<"second":utf8>>)
-      let _ = fcgi.send_chunk(sender, <<"third":utf8>>)
+      let _ = fcgi.send_chunk(sender, bytes_tree.from_string("first"))
+      let _ = fcgi.send_chunk(sender, bytes_tree.from_string("second"))
+      let _ = fcgi.send_chunk(sender, bytes_tree.from_string("third"))
       Nil
     }
     response.new(200)
@@ -823,7 +823,10 @@ pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
 
 pub fn stream_send_chunk_splits_large_payload_into_max_size_records_test() {
   use path <- helpers.with_temp_socket_path
-  let chunk = bit_array.concat(list.repeat(<<"x":utf8>>, 100_000))
+  let chunk =
+    list.repeat(<<"x":utf8>>, 100_000)
+    |> bit_array.concat
+    |> bytes_tree.from_bit_array
   let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
     let producer = fn(sender) {
       let _ = fcgi.send_chunk(sender, chunk)
@@ -871,7 +874,9 @@ pub fn stream_send_chunk_splits_large_payload_into_max_size_records_test() {
   let stdout_total = helpers.collect_stdout(records)
   let assert Ok(text) = bit_array.to_string(stdout_total)
   let assert Ok(#(_headers, body_text)) = string.split_once(text, "\r\n\r\n")
-  let assert Ok(chunk_text) = bit_array.to_string(chunk)
+  let assert Ok(chunk_text) =
+    bytes_tree.to_bit_array(chunk)
+    |> bit_array.to_string
   assert body_text == chunk_text
 }
 
@@ -879,7 +884,7 @@ pub fn stream_producer_panic_still_emits_end_request_test() {
   use path <- helpers.with_temp_socket_path
   let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
     let producer = fn(sender) {
-      let _ = fcgi.send_chunk(sender, <<"partial":utf8>>)
+      let _ = fcgi.send_chunk(sender, bytes_tree.from_string("partial"))
       panic as "stream producer exploded"
     }
     response.new(200)
@@ -922,10 +927,10 @@ pub fn stream_send_chunk_returns_error_after_peer_disconnect_test() {
   let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
     let producer = fn(sender) {
       let proceed = process.new_subject()
-      let _ = fcgi.send_chunk(sender, <<"first":utf8>>)
+      let _ = fcgi.send_chunk(sender, bytes_tree.from_string("first"))
       process.send(handshake, proceed)
       let assert Ok(Nil) = process.receive(proceed, 5000)
-      let result = fcgi.send_chunk(sender, <<"second":utf8>>)
+      let result = fcgi.send_chunk(sender, bytes_tree.from_string("second"))
       process.send(second_result, result)
       Nil
     }

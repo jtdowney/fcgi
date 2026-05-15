@@ -27,7 +27,7 @@ const default_body_read_timeout_ms = 30_000
 
 const default_max_body_size = 268_435_456
 
-const owner_handshake_timeout_ms = 5000
+const socket_owner_transfer_timeout_ms = 5000
 
 /// Streaming reader for the request body. The handler receives one in
 /// `req.body`; call it to obtain the first `Read`, then advance via the
@@ -60,9 +60,7 @@ pub type ReadError {
 /// returns `BodyTooLarge` if the peer exceeds it.
 ///
 /// The buffered length reflects what the upstream proxy actually sent,
-/// not what `CONTENT_LENGTH` advertised. `End` signals that the upstream
-/// proxy closed stdin, not that the consumed byte count matches the
-/// `CONTENT_LENGTH` header.
+/// not what `CONTENT_LENGTH` advertised.
 pub fn read_all(read: BodyReader) -> Result(BytesTree, ReadError) {
   read_all_loop(read(), bytes_tree.new())
 }
@@ -227,9 +225,8 @@ pub type InternalResponseData {
 pub type ResponseData =
   InternalResponseData
 
-/// Handle passed to a `Stream` producer. Use `send_chunk` to emit body
-/// bytes; each call writes one or more FastCGI `STDOUT` records on the
-/// open connection.
+/// Use `send_chunk` to emit body bytes; each call writes one or more FastCGI
+/// `STDOUT` records on the open connection.
 pub opaque type StreamSender {
   StreamSender(socket: Socket, request_id: Int)
 }
@@ -239,12 +236,9 @@ pub opaque type StreamSender {
 /// Returns `Ok(Nil)` when the chunk is written, or `Error(Nil)` when the
 /// underlying socket write fails (for example, the upstream proxy has
 /// disconnected).
-pub fn send_chunk(sender: StreamSender, data: BitArray) -> Result(Nil, Nil) {
+pub fn send_chunk(sender: StreamSender, data: BytesTree) -> Result(Nil, Nil) {
   let StreamSender(socket:, request_id:) = sender
-  send_if_nonempty(
-    socket,
-    handler.encode_stdout_chunk(request_id, bytes_tree.from_bit_array(data)),
-  )
+  send_if_nonempty(socket, handler.encode_stdout_chunk(request_id, data))
 }
 
 /// Build an in-memory response body. The whole `BytesTree` is sent in
@@ -579,7 +573,7 @@ fn start_supervisor(
 }
 
 type NextRequest {
-  Started(
+  Ready(
     state: handler.State,
     request_id: Int,
     params: BitArray,
@@ -611,7 +605,7 @@ fn start_connection(worker: Worker) -> actor.StartResult(process.Subject(Nil)) {
       let go = process.new_subject()
       process.send(report_back, go)
 
-      case process.receive(go, owner_handshake_timeout_ms) {
+      case process.receive(go, socket_owner_transfer_timeout_ms) {
         Ok(Nil) -> {
           run_connection_loop(worker, handler.Idle(<<>>))
           close_socket(worker.socket)
@@ -620,7 +614,7 @@ fn start_connection(worker: Worker) -> actor.StartResult(process.Subject(Nil)) {
       }
     })
 
-  case process.receive(report_back, owner_handshake_timeout_ms) {
+  case process.receive(report_back, socket_owner_transfer_timeout_ms) {
     Ok(go) -> Ok(actor.Started(pid:, data: go))
     Error(Nil) -> {
       process.send_exit(pid)
@@ -632,12 +626,13 @@ fn start_connection(worker: Worker) -> actor.StartResult(process.Subject(Nil)) {
 fn run_connection_loop(worker: Worker, state: handler.State) -> Nil {
   case next_request(worker, state, <<>>) {
     Closed -> Nil
-    Started(state:, request_id:, params:, remaining_events:, keep_conn:) ->
+    Ready(state:, request_id:, params:, remaining_events:, keep_conn:) ->
       case
         process_request(worker, state, request_id, params, remaining_events)
       {
         Error(_) -> Nil
-        Ok(tracker) -> continue_after_request(worker, state, keep_conn, tracker)
+        Ok(snapshots) ->
+          continue_after_request(worker, state, keep_conn, snapshots)
       }
   }
 }
@@ -646,13 +641,13 @@ fn continue_after_request(
   worker: Worker,
   state: handler.State,
   keep_conn: Bool,
-  tracker: Option(Tracker),
+  snapshots: Option(process.Subject(BodySnapshot)),
 ) -> Nil {
   use <- bool.guard(when: !keep_conn, return: Nil)
-  case tracker {
+  case snapshots {
     option.None -> run_connection_loop(worker, state)
-    option.Some(tracker) ->
-      case finalize_body_reader(worker, tracker) {
+    option.Some(subject) ->
+      case drain_unread_body(worker, subject) {
         Error(_) -> Nil
         Ok(next_state) -> run_connection_loop(worker, next_state)
       }
@@ -722,7 +717,7 @@ fn next_request(
   let _ = send_if_nonempty(worker.socket, outcome.outgoing)
   case outcome.events {
     [handler.Start(request_id, params, keep_conn), ..rest] ->
-      Started(
+      Ready(
         state: outcome.state,
         request_id:,
         params:,
@@ -854,7 +849,7 @@ fn process_request(
   request_id: Int,
   params: BitArray,
   events: List(handler.Event),
-) -> Result(Option(Tracker), Nil) {
+) -> Result(Option(process.Subject(BodySnapshot)), Nil) {
   use <- bool.lazy_guard(
     when: list.contains(events, handler.BodyTooLarge),
     return: fn() {
@@ -881,10 +876,10 @@ fn process_request(
       |> result.replace(option.None)
     }
     Ok(#(req, cgi)) -> {
-      let #(reader, tracker) = start_body_reader(worker, state, events)
+      let #(reader, snapshots) = build_body_reader(worker, state, events)
       let response = run_user_handler(worker.handler, req, cgi, reader)
       send_response(worker.socket, request_id, response)
-      |> result.replace(tracker)
+      |> result.replace(snapshots)
     }
   }
 }
@@ -1076,11 +1071,6 @@ fn drain_sendfile_loop(
   }
 }
 
-@internal
-pub type Tracker {
-  Tracker(subject: process.Subject(BodySnapshot), initial: BodySnapshot)
-}
-
 type BodyContext {
   BodyContext(
     state: handler.State,
@@ -1088,13 +1078,49 @@ type BodyContext {
     finished: Bool,
     overflowed: Bool,
     worker: Worker,
-    tracker: Option(process.Subject(BodySnapshot)),
+    snapshots: Option(process.Subject(BodySnapshot)),
   )
 }
 
 @internal
 pub type BodySnapshot {
   BodySnapshot(state: handler.State, finished: Bool, overflowed: Bool)
+}
+
+fn buffered_reader(data: BitArray, overflowed: Bool) -> BodyReader {
+  case overflowed, bit_array.byte_size(data) {
+    True, _ -> fn() { Error(BodyTooLarge) }
+    False, 0 -> fn() { Ok(End) }
+    False, _ -> fn() { Ok(Chunk(data, fn() { Ok(End) })) }
+  }
+}
+
+fn build_body_reader(
+  worker: Worker,
+  state: handler.State,
+  events: List(handler.Event),
+) -> #(BodyReader, Option(process.Subject(BodySnapshot))) {
+  let #(data, ended, overflowed) = collect_body_events(events)
+  case ended || overflowed {
+    True -> #(buffered_reader(data, overflowed), option.None)
+    False -> {
+      let subject = process.new_subject()
+      process.send(
+        subject,
+        BodySnapshot(state:, finished: False, overflowed: False),
+      )
+      let ctx =
+        BodyContext(
+          state:,
+          pending: data,
+          finished: False,
+          overflowed: False,
+          worker:,
+          snapshots: option.Some(subject),
+        )
+      #(fn() { read_step(ctx) }, option.Some(subject))
+    }
+  }
 }
 
 fn collect_body_events(events: List(handler.Event)) -> #(BitArray, Bool, Bool) {
@@ -1125,14 +1151,6 @@ fn collect_body_events_loop(
   }
 }
 
-fn constant_reader(data: BitArray, overflowed: Bool) -> BodyReader {
-  case overflowed, bit_array.byte_size(data) {
-    True, _ -> fn() { Error(BodyTooLarge) }
-    False, 0 -> fn() { Ok(End) }
-    False, _ -> fn() { Ok(Chunk(data, fn() { Ok(End) })) }
-  }
-}
-
 fn deliver_pending(ctx: BodyContext) -> Result(Read, ReadError) {
   let next_ctx = BodyContext(..ctx, pending: <<>>)
   send_snapshot(next_ctx)
@@ -1145,71 +1163,50 @@ fn drain_body_loop(
 ) -> Result(handler.State, Nil) {
   use <- bool.guard(when: snap.overflowed, return: Error(Nil))
   use <- bool.guard(when: snap.finished, return: Ok(snap.state))
-  case worker_recv(worker) {
+  case step_with_socket(snap, worker) {
     Error(_) -> Error(Nil)
-    Ok(more) -> {
-      let outcome =
-        handler.step(
-          snap.state,
-          bytes: more,
-          max_body_size: worker.max_body_size,
-        )
-      worker_send(worker, outcome.outgoing)
-      let #(_data, ended, overflowed) = collect_body_events(outcome.events)
-      let next =
-        BodySnapshot(
-          state: outcome.state,
-          finished: snap.finished || ended,
-          overflowed: snap.overflowed || overflowed,
-        )
-      drain_body_loop(next, worker)
-    }
+    Ok(#(_data, next)) -> drain_body_loop(next, worker)
   }
 }
 
-fn drain_tracker_loop(
+fn drain_unread_body(
+  worker: Worker,
+  subject: process.Subject(BodySnapshot),
+) -> Result(handler.State, Nil) {
+  case process.receive(subject, 0) {
+    Error(_) -> Error(Nil)
+    Ok(first) -> drain_body_loop(latest_snapshot_loop(subject, first), worker)
+  }
+}
+
+fn latest_snapshot_loop(
   subject: process.Subject(BodySnapshot),
   latest: BodySnapshot,
 ) -> BodySnapshot {
   case process.receive(subject, 0) {
     Error(_) -> latest
-    Ok(snap) -> drain_tracker_loop(subject, snap)
+    Ok(snap) -> latest_snapshot_loop(subject, snap)
   }
-}
-
-fn finalize_body_reader(
-  worker: Worker,
-  tracker: Tracker,
-) -> Result(handler.State, Nil) {
-  let Tracker(subject:, initial:) = tracker
-  let final = drain_tracker_loop(subject, initial)
-  drain_body_loop(final, worker)
 }
 
 fn pull_more(ctx: BodyContext) -> Result(Read, ReadError) {
-  case worker_recv(ctx.worker) {
-    Error(reason) -> Error(reason)
-    Ok(more) -> {
-      let outcome =
-        handler.step(
-          ctx.state,
-          bytes: more,
-          max_body_size: ctx.worker.max_body_size,
-        )
-      worker_send(ctx.worker, outcome.outgoing)
-      let #(new_data, ended, overflowed) = collect_body_events(outcome.events)
-      let next_ctx =
-        BodyContext(
-          ..ctx,
-          state: outcome.state,
-          pending: <<ctx.pending:bits, new_data:bits>>,
-          finished: ctx.finished || ended,
-          overflowed: ctx.overflowed || overflowed,
-        )
-      send_snapshot(next_ctx)
-      read_step(next_ctx)
-    }
-  }
+  let prior =
+    BodySnapshot(
+      state: ctx.state,
+      finished: ctx.finished,
+      overflowed: ctx.overflowed,
+    )
+  use #(new_data, next) <- result.try(step_with_socket(prior, ctx.worker))
+  let next_ctx =
+    BodyContext(
+      ..ctx,
+      state: next.state,
+      pending: <<ctx.pending:bits, new_data:bits>>,
+      finished: next.finished,
+      overflowed: next.overflowed,
+    )
+  send_snapshot(next_ctx)
+  read_step(next_ctx)
 }
 
 fn read_step(ctx: BodyContext) -> Result(Read, ReadError) {
@@ -1222,7 +1219,7 @@ fn read_step(ctx: BodyContext) -> Result(Read, ReadError) {
 }
 
 fn send_snapshot(ctx: BodyContext) -> Nil {
-  case ctx.tracker {
+  case ctx.snapshots {
     option.None -> Nil
     option.Some(subject) ->
       process.send(
@@ -1236,29 +1233,22 @@ fn send_snapshot(ctx: BodyContext) -> Nil {
   }
 }
 
-fn start_body_reader(
+fn step_with_socket(
+  prior: BodySnapshot,
   worker: Worker,
-  state: handler.State,
-  events: List(handler.Event),
-) -> #(BodyReader, Option(Tracker)) {
-  let #(data, ended, overflowed) = collect_body_events(events)
-  case ended || overflowed {
-    True -> #(constant_reader(data, overflowed), option.None)
-    False -> {
-      let subject = process.new_subject()
-      let initial = BodySnapshot(state:, finished: False, overflowed: False)
-      let ctx =
-        BodyContext(
-          state:,
-          pending: data,
-          finished: False,
-          overflowed: False,
-          worker:,
-          tracker: option.Some(subject),
-        )
-      #(fn() { read_step(ctx) }, option.Some(Tracker(subject:, initial:)))
-    }
-  }
+) -> Result(#(BitArray, BodySnapshot), ReadError) {
+  use more <- result.try(worker_recv(worker))
+  let outcome =
+    handler.step(prior.state, bytes: more, max_body_size: worker.max_body_size)
+  worker_send(worker, outcome.outgoing)
+  let #(data, ended, overflowed) = collect_body_events(outcome.events)
+  let snapshot =
+    BodySnapshot(
+      state: outcome.state,
+      finished: prior.finished || ended,
+      overflowed: prior.overflowed || overflowed,
+    )
+  Ok(#(data, snapshot))
 }
 
 fn worker_recv(worker: Worker) -> Result(BitArray, ReadError) {

@@ -5,7 +5,6 @@
 //// browser's `EventSource` API.
 
 import fcgi
-import gleam/bit_array
 import gleam/bool
 import gleam/bytes_tree
 import gleam/erlang/process
@@ -77,7 +76,7 @@ fn emit_events(sender: fcgi.StreamSender, n: Int) -> Nil {
     <> " of "
     <> int.to_string(event_count)
     <> "\n\n"
-  case fcgi.send_chunk(sender, bit_array.from_string(payload)) {
+  case fcgi.send_chunk(sender, bytes_tree.from_string(payload)) {
     Error(_) -> Nil
     Ok(_) -> {
       process.sleep(event_interval_ms)
