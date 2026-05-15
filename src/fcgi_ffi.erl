@@ -92,7 +92,12 @@ close_socket(Socket) ->
     nil.
 
 send(Socket, Data) ->
-    map_posix(gen_tcp:send(Socket, Data)).
+    case gen_tcp:send(Socket, Data) of
+        ok ->
+            {ok, nil};
+        {error, _} ->
+            {error, nil}
+    end.
 
 controlling_process(Socket, Pid) ->
     map_posix(gen_tcp:controlling_process(Socket, Pid)).

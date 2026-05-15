@@ -246,8 +246,8 @@ pub fn multiplexing_rejected_with_cant_mpx_conn_test() {
     )
   assert rest == <<>>
   assert outcome.continuation == handler.WaitForMore
-  let assert handler.Receiving(_, partial) = outcome.state
-  assert partial.request_id == 1
+  let assert handler.Receiving(recv) = outcome.state
+  assert recv.request_id == 1
 }
 
 pub fn unknown_record_type_replies_with_unknown_type_test() {

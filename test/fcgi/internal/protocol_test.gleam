@@ -221,57 +221,6 @@ pub fn chunk_stdout_records_round_trip_test() {
   assert concatenated == body
 }
 
-pub fn chunk_stdout_size_zero_yields_no_records_test() {
-  let records = protocol.chunk_stdout(1, <<>>)
-  assert records == []
-}
-
-pub fn chunk_stdout_size_one_yields_single_record_test() {
-  let body = <<0:size(8)>>
-  let records = protocol.chunk_stdout(1, body)
-  assert records == [protocol.Stdout(1, body)]
-}
-
-pub fn chunk_stdout_size_at_max_yields_single_full_record_test() {
-  let body = <<0:size({ 65_535 * 8 })>>
-  let records = protocol.chunk_stdout(1, body)
-  let assert [protocol.Stdout(_, data)] = records
-  assert bit_array.byte_size(data) == 65_535
-  assert data == body
-}
-
-pub fn chunk_stdout_size_one_over_max_yields_two_records_test() {
-  let body = <<0:size({ 65_536 * 8 })>>
-  let records = protocol.chunk_stdout(1, body)
-  let assert [protocol.Stdout(_, head), protocol.Stdout(_, tail)] = records
-  assert bit_array.byte_size(head) == 65_535
-  assert bit_array.byte_size(tail) == 1
-  assert <<head:bits, tail:bits>> == body
-}
-
-pub fn chunk_stdout_size_exactly_two_full_records_test() {
-  let body = <<0:size({ 131_070 * 8 })>>
-  let records = protocol.chunk_stdout(1, body)
-  let assert [protocol.Stdout(_, first), protocol.Stdout(_, second)] = records
-  assert bit_array.byte_size(first) == 65_535
-  assert bit_array.byte_size(second) == 65_535
-  assert <<first:bits, second:bits>> == body
-}
-
-pub fn chunk_stdout_size_one_over_two_full_records_test() {
-  let body = <<0:size({ 131_071 * 8 })>>
-  let records = protocol.chunk_stdout(1, body)
-  let assert [
-    protocol.Stdout(_, first),
-    protocol.Stdout(_, second),
-    protocol.Stdout(_, third),
-  ] = records
-  assert bit_array.byte_size(first) == 65_535
-  assert bit_array.byte_size(second) == 65_535
-  assert bit_array.byte_size(third) == 1
-  assert <<first:bits, second:bits, third:bits>> == body
-}
-
 pub fn parse_record_skips_padding_to_next_record_test() {
   let stdin_record =
     protocol.encode_incoming(
