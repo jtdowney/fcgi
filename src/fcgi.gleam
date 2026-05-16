@@ -177,6 +177,11 @@ pub type ReadError {
   ReadTimeout
   /// The body exceeded `max_body_size`.
   BodyTooLarge
+  /// The upstream proxy sent `FCGI_ABORT_REQUEST` or an unrecoverable
+  /// framing error while the handler was reading the body. The
+  /// connection will be closed after the handler returns and the
+  /// handler's response, if any, is discarded.
+  RequestAborted
 }
 
 /// Buffer the entire body into a `BytesTree`. The server's
@@ -615,6 +620,11 @@ type NextRequest {
   Closed
 }
 
+type RequestStep {
+  ResumeIdle
+  ResumeDrain(snapshot: BodySnapshot)
+}
+
 fn run_connection_loop(worker: Worker, state: handler.State) -> Nil {
   case next_request(worker, state, <<>>) {
     Closed -> Nil
@@ -623,7 +633,7 @@ fn run_connection_loop(worker: Worker, state: handler.State) -> Nil {
         process_request(worker, state, request_id, params, remaining_events)
       {
         Error(_) -> Nil
-        Ok(snapshots) -> resume_connection(worker, state, keep_conn, snapshots)
+        Ok(step) -> resume_connection(worker, state, keep_conn, step)
       }
   }
 }
@@ -632,13 +642,13 @@ fn resume_connection(
   worker: Worker,
   state: handler.State,
   keep_conn: Bool,
-  snapshots: Option(process.Subject(BodySnapshot)),
+  step: RequestStep,
 ) -> Nil {
   use <- bool.guard(when: !keep_conn, return: Nil)
-  case snapshots {
-    option.None -> run_connection_loop(worker, state)
-    option.Some(subject) ->
-      case drain_unread_body(worker, subject) {
+  case step {
+    ResumeIdle -> run_connection_loop(worker, state)
+    ResumeDrain(snap) ->
+      case drain_body_loop(snap, worker) {
         Error(_) -> Nil
         Ok(next_state) -> run_connection_loop(worker, next_state)
       }
@@ -693,30 +703,43 @@ fn process_request(
   request_id: Int,
   params: BitArray,
   events: List(handler.Event),
-) -> Result(Option(process.Subject(BodySnapshot)), Nil) {
+) -> Result(RequestStep, Nil) {
   case parse_params(params) {
     Error(message) -> {
       logging.log(logging.Warning, "rejecting request: " <> message)
       let response = error_response(400, message)
       send_response(worker.socket, request_id, response)
-      |> result.replace(option.None)
+      |> result.replace(ResumeIdle)
     }
     Ok(#(req, cgi)) -> {
       let overflowed = list.contains(events, handler.BodyTooLarge)
       let #(reader, snapshots) = build_body_reader(worker, state, events)
       let response = run_user_handler(worker.handler, req, cgi, reader)
+
+      let latest =
+        snapshots
+        |> option.to_result(Nil)
+        |> result.try(process.receive(_, 0))
+      let aborted =
+        latest
+        |> result.map(fn(snap) { snap.aborted })
+        |> result.unwrap(False)
+
+      use <- bool.guard(when: aborted, return: Error(Nil))
       use _ <- result.try(send_response(worker.socket, request_id, response))
-      case overflowed {
-        True -> {
-          logging.log(
-            logging.Warning,
-            "closing connection: body exceeded max_body_size of "
-              <> int.to_string(worker.max_body_size)
-              <> " bytes",
-          )
-          Error(Nil)
-        }
-        False -> Ok(snapshots)
+      use <- bool.lazy_guard(when: overflowed, return: fn() {
+        logging.log(
+          logging.Warning,
+          "closing connection: body exceeded max_body_size of "
+            <> int.to_string(worker.max_body_size)
+            <> " bytes",
+        )
+        Error(Nil)
+      })
+
+      case latest {
+        Error(_) -> Ok(ResumeIdle)
+        Ok(snap) -> Ok(ResumeDrain(snap))
       }
     }
   }
@@ -1074,7 +1097,12 @@ type BodyContext {
 }
 
 type BodySnapshot {
-  BodySnapshot(state: handler.State, finished: Bool, overflowed: Bool)
+  BodySnapshot(
+    state: handler.State,
+    finished: Bool,
+    overflowed: Bool,
+    aborted: Bool,
+  )
 }
 
 fn build_body_reader(
@@ -1089,7 +1117,7 @@ fn build_body_reader(
       let subject = process.new_subject()
       process.send(
         subject,
-        BodySnapshot(state:, finished: False, overflowed: False),
+        BodySnapshot(state:, finished: False, overflowed: False, aborted: False),
       )
       let ctx =
         BodyContext(
@@ -1152,14 +1180,6 @@ fn next_read(ctx: BodyContext) -> Result(Read, ReadError) {
 
 fn deliver_pending(ctx: BodyContext) -> Result(Read, ReadError) {
   let next_ctx = BodyContext(..ctx, pending: <<>>)
-  process.send(
-    next_ctx.snapshots,
-    BodySnapshot(
-      state: next_ctx.state,
-      finished: next_ctx.finished,
-      overflowed: next_ctx.overflowed,
-    ),
-  )
   Ok(Chunk(data: ctx.pending, consume: fn() { next_read(next_ctx) }))
 }
 
@@ -1169,18 +1189,46 @@ fn pull_more(ctx: BodyContext) -> Result(Read, ReadError) {
       state: ctx.state,
       finished: ctx.finished,
       overflowed: ctx.overflowed,
+      aborted: False,
     )
+
   use #(new_data, next) <- result.try(recv_and_step(prior, ctx.worker))
-  let next_ctx =
+  let _ = process.receive(ctx.snapshots, 0)
+  process.send(ctx.snapshots, next)
+
+  use <- bool.guard(when: next.aborted, return: Error(RequestAborted))
+  next_read(
     BodyContext(
       ..ctx,
       state: next.state,
       pending: <<ctx.pending:bits, new_data:bits>>,
       finished: next.finished,
       overflowed: next.overflowed,
+    ),
+  )
+}
+
+fn step_body(
+  prior: BodySnapshot,
+  bytes: BitArray,
+  worker: Worker,
+) -> #(BitArray, BodySnapshot, BytesTree) {
+  let outcome =
+    handler.step(prior.state, bytes:, max_body_size: worker.max_body_size)
+  let #(data, ended, overflowed) = collect_body_events(outcome.events)
+  let aborted = case outcome.continuation {
+    handler.CloseConnection -> True
+    handler.WaitForMore -> False
+  }
+
+  let snapshot =
+    BodySnapshot(
+      state: outcome.state,
+      finished: prior.finished || ended,
+      overflowed: prior.overflowed || overflowed,
+      aborted: prior.aborted || aborted,
     )
-  process.send(next_ctx.snapshots, next)
-  next_read(next_ctx)
+  #(data, snapshot, outcome.outgoing)
 }
 
 fn recv_and_step(
@@ -1188,16 +1236,8 @@ fn recv_and_step(
   worker: Worker,
 ) -> Result(#(BitArray, BodySnapshot), ReadError) {
   use more <- result.try(worker_recv(worker))
-  let outcome =
-    handler.step(prior.state, bytes: more, max_body_size: worker.max_body_size)
-  let _ = send_if_nonempty(worker.socket, outcome.outgoing)
-  let #(data, ended, overflowed) = collect_body_events(outcome.events)
-  let snapshot =
-    BodySnapshot(
-      state: outcome.state,
-      finished: prior.finished || ended,
-      overflowed: prior.overflowed || overflowed,
-    )
+  let #(data, snapshot, outgoing) = step_body(prior, more, worker)
+  let _ = send_if_nonempty(worker.socket, outgoing)
   Ok(#(data, snapshot))
 }
 
@@ -1214,35 +1254,19 @@ fn worker_recv(worker: Worker) -> Result(BitArray, ReadError) {
   }
 }
 
-fn drain_unread_body(
-  worker: Worker,
-  subject: process.Subject(BodySnapshot),
-) -> Result(handler.State, Nil) {
-  case process.receive(subject, 0) {
-    Error(_) -> Error(Nil)
-    Ok(first) -> drain_body_loop(latest_snapshot_loop(subject, first), worker)
-  }
-}
-
-fn latest_snapshot_loop(
-  subject: process.Subject(BodySnapshot),
-  latest: BodySnapshot,
-) -> BodySnapshot {
-  case process.receive(subject, 0) {
-    Error(_) -> latest
-    Ok(snap) -> latest_snapshot_loop(subject, snap)
-  }
-}
-
 fn drain_body_loop(
   snap: BodySnapshot,
   worker: Worker,
 ) -> Result(handler.State, Nil) {
-  use <- bool.guard(when: snap.overflowed, return: Error(Nil))
+  use <- bool.guard(when: snap.overflowed || snap.aborted, return: Error(Nil))
   use <- bool.guard(when: snap.finished, return: Ok(snap.state))
-  case recv_and_step(snap, worker) {
+
+  case worker_recv(worker) {
     Error(_) -> Error(Nil)
-    Ok(#(_data, next)) -> drain_body_loop(next, worker)
+    Ok(more) -> {
+      let #(_data, next, _outgoing) = step_body(snap, more, worker)
+      drain_body_loop(next, worker)
+    }
   }
 }
 

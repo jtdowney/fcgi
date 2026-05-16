@@ -862,6 +862,275 @@ pub fn body_reader_returns_client_disconnected_when_peer_closes_test() {
   assert observed == "disconnected"
 }
 
+pub fn body_reader_returns_request_aborted_when_peer_aborts_test() {
+  use path <- helpers.with_temp_socket_path
+  let begin =
+    helpers.encode_incoming(protocol.BeginRequest(
+      request_id: 1,
+      role: protocol.responder_role,
+      keep_conn: False,
+    ))
+  let real_params =
+    helpers.encode_incoming(protocol.Params(
+      request_id: 1,
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
+    ))
+  let params_end =
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+  let stdin_partial =
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<"AAA":utf8>>))
+  let abort = helpers.encode_incoming(protocol.AbortRequest(request_id: 1))
+
+  let signal = process.new_subject()
+  let handler = fn(req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
+    let assert Ok(fcgi.Chunk(_, consume)) = req.body()
+    process.send(signal, "first-chunk")
+    case consume() {
+      Error(fcgi.RequestAborted) -> process.send(signal, "aborted")
+      other -> process.send(signal, "unexpected:" <> string.inspect(other))
+    }
+    response.new(200)
+    |> response.set_header("content-type", "text/plain")
+    |> response.set_body(fcgi.bytes(bytes_tree.from_string("ignored")))
+  }
+
+  let assert Ok(started) =
+    handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect_unix(path)
+  let assert Ok(_) =
+    sockets.send_bits(socket, <<
+      begin:bits,
+      real_params:bits,
+      params_end:bits,
+      stdin_partial:bits,
+    >>)
+  let assert Ok("first-chunk") = process.receive(signal, 1000)
+  let assert Ok(_) = sockets.send_bits(socket, abort)
+  let assert Ok(observed) = process.receive(signal, 1000)
+  let assert Ok(bytes) = test_client.recv_all(socket, 1000)
+  sockets.close_socket(socket)
+  helpers.stop_supervisor(started)
+
+  assert observed == "aborted"
+
+  let records = helpers.decode_all_records(bytes)
+  assert helpers.collect_stdout(records) == <<>>
+  let end_records =
+    list.filter(records, fn(record) {
+      case record {
+        protocol.EndRequest(_, _, _) -> True
+        _ -> False
+      }
+    })
+  assert end_records
+    == [
+      protocol.EndRequest(
+        request_id: 1,
+        app_status: 0,
+        protocol_status: protocol.RequestComplete,
+      ),
+    ]
+}
+
+pub fn body_reader_aborted_closes_keep_alive_connection_test() {
+  use path <- helpers.with_temp_socket_path
+  let begin =
+    helpers.encode_incoming(protocol.BeginRequest(
+      request_id: 1,
+      role: protocol.responder_role,
+      keep_conn: True,
+    ))
+  let real_params =
+    helpers.encode_incoming(protocol.Params(
+      request_id: 1,
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
+    ))
+  let params_end =
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+  let stdin_partial =
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<"AAA":utf8>>))
+  let abort = helpers.encode_incoming(protocol.AbortRequest(request_id: 1))
+  let follow_up =
+    helpers.request_stream_bytes(
+      request_id: 2,
+      params: [#("REQUEST_METHOD", "GET")],
+      body: <<>>,
+      keep_conn: False,
+    )
+
+  let signal = process.new_subject()
+  let handler = fn(req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
+    let assert Ok(fcgi.Chunk(_, consume)) = req.body()
+    process.send(signal, "first-chunk")
+    case consume() {
+      Error(fcgi.RequestAborted) -> process.send(signal, "aborted")
+      other -> process.send(signal, "unexpected:" <> string.inspect(other))
+    }
+    response.new(200)
+    |> response.set_header("content-type", "text/plain")
+    |> response.set_body(fcgi.bytes(bytes_tree.from_string("ignored")))
+  }
+
+  let assert Ok(started) =
+    handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect_unix(path)
+  let assert Ok(_) =
+    sockets.send_bits(socket, <<
+      begin:bits,
+      real_params:bits,
+      params_end:bits,
+      stdin_partial:bits,
+    >>)
+  let assert Ok("first-chunk") = process.receive(signal, 1000)
+  let assert Ok(_) = sockets.send_bits(socket, abort)
+  let assert Ok("aborted") = process.receive(signal, 1000)
+  let assert Ok(after_abort) = test_client.recv_all(socket, 1000)
+  let assert Error(_) = sockets.send_bits(socket, follow_up)
+  let assert Ok(after_follow_up) = test_client.recv_all(socket, 200)
+  sockets.close_socket(socket)
+  helpers.stop_supervisor(started)
+
+  let records = helpers.decode_all_records(after_abort)
+  let end_records =
+    list.filter(records, fn(record) {
+      case record {
+        protocol.EndRequest(_, _, _) -> True
+        _ -> False
+      }
+    })
+  assert end_records
+    == [
+      protocol.EndRequest(
+        request_id: 1,
+        app_status: 0,
+        protocol_status: protocol.RequestComplete,
+      ),
+    ]
+  assert after_follow_up == <<>>
+}
+
+pub fn body_reader_returns_request_aborted_on_malformed_framing_test() {
+  use path <- helpers.with_temp_socket_path
+  let begin =
+    helpers.encode_incoming(protocol.BeginRequest(
+      request_id: 1,
+      role: protocol.responder_role,
+      keep_conn: False,
+    ))
+  let real_params =
+    helpers.encode_incoming(protocol.Params(
+      request_id: 1,
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "POST")])
+        |> bytes_tree.to_bit_array,
+    ))
+  let params_end =
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+  let stdin_partial =
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<"AAA":utf8>>))
+  let malformed = <<0:8, 5:8, 0:16, 0:16, 0:8, 0:8>>
+
+  let signal = process.new_subject()
+  let handler = fn(req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
+    let assert Ok(fcgi.Chunk(_, consume)) = req.body()
+    process.send(signal, "first-chunk")
+    case consume() {
+      Error(fcgi.RequestAborted) -> process.send(signal, "aborted")
+      other -> process.send(signal, "unexpected:" <> string.inspect(other))
+    }
+    response.new(200)
+    |> response.set_header("content-type", "text/plain")
+    |> response.set_body(fcgi.bytes(bytes_tree.from_string("ignored")))
+  }
+
+  let assert Ok(started) =
+    handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect_unix(path)
+  let assert Ok(_) =
+    sockets.send_bits(socket, <<
+      begin:bits,
+      real_params:bits,
+      params_end:bits,
+      stdin_partial:bits,
+    >>)
+  let assert Ok("first-chunk") = process.receive(signal, 1000)
+  let assert Ok(_) = sockets.send_bits(socket, malformed)
+  let assert Ok(observed) = process.receive(signal, 1000)
+  let assert Ok(bytes) = test_client.recv_all(socket, 1000)
+  sockets.close_socket(socket)
+  helpers.stop_supervisor(started)
+
+  assert observed == "aborted"
+  assert bytes == <<>>
+}
+
+pub fn abort_after_body_end_does_not_disrupt_handler_response_test() {
+  use path <- helpers.with_temp_socket_path
+  let request_bytes =
+    helpers.request_stream_bytes(
+      request_id: 1,
+      params: [#("REQUEST_METHOD", "POST")],
+      body: <<"hello":utf8>>,
+      keep_conn: True,
+    )
+  let abort = helpers.encode_incoming(protocol.AbortRequest(request_id: 1))
+
+  let handler = fn(req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
+    let assert Ok(buffered) = fcgi.read_all(req.body)
+    response.new(200)
+    |> response.set_header("content-type", "text/plain")
+    |> response.set_body(fcgi.bytes(buffered))
+  }
+
+  let assert Ok(started) =
+    handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect_unix(path)
+  let assert Ok(_) =
+    sockets.send_bits(socket, <<request_bytes:bits, abort:bits>>)
+  let assert Ok(bytes) = test_client.recv_all(socket, 1000)
+  sockets.close_socket(socket)
+  helpers.stop_supervisor(started)
+
+  let records = helpers.decode_all_records(bytes)
+  let stdout_payload = helpers.collect_stdout(records)
+  let assert Ok(text) = bit_array.to_string(stdout_payload)
+  let assert Ok(#(_headers, body_text)) = string.split_once(text, "\r\n\r\n")
+  assert body_text == "hello"
+
+  let end_records =
+    list.filter(records, fn(record) {
+      case record {
+        protocol.EndRequest(_, _, _) -> True
+        _ -> False
+      }
+    })
+  assert end_records
+    == [
+      protocol.EndRequest(
+        request_id: 1,
+        app_status: 0,
+        protocol_status: protocol.RequestComplete,
+      ),
+    ]
+}
+
 pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
   use path <- helpers.with_temp_socket_path
   let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
