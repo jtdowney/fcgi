@@ -537,42 +537,64 @@ fn accept_loop(
   handler: ServerHandler,
 ) -> Nil {
   case accept(listen_socket) {
-    Error(reason) -> {
+    Error(reason) ->
       case atom.to_string(reason) {
-        "emfile" | "enfile" -> {
+        "closed" ->
+          logging.log(logging.Info, "acceptor stopping: listener closed")
+        name -> {
           logging.log(
             logging.Warning,
-            "accept failed: file descriptor exhaustion, retrying",
+            "accept failed: " <> name <> ", retrying",
           )
           process.sleep(100)
+          accept_loop(
+            listen_socket,
+            factory,
+            max_body_size,
+            body_read_timeout_ms,
+            handler,
+          )
         }
-        _ -> Nil
       }
-    }
     Ok(client) -> {
-      let worker =
-        Worker(socket: client, max_body_size:, body_read_timeout_ms:, handler:)
-      case factory_supervisor.start_child(factory, worker) {
-        Error(_) -> close_socket(client)
-        Ok(started) ->
-          case controlling_process(client, started.pid) {
-            Error(_) -> {
-              close_socket(client)
-              process.send_exit(started.pid)
-            }
-            Ok(Nil) -> process.send(started.data, Nil)
-          }
-      }
+      handle_accepted_client(
+        client,
+        factory,
+        max_body_size,
+        body_read_timeout_ms,
+        handler,
+      )
+      accept_loop(
+        listen_socket,
+        factory,
+        max_body_size,
+        body_read_timeout_ms,
+        handler,
+      )
     }
   }
+}
 
-  accept_loop(
-    listen_socket,
-    factory,
-    max_body_size,
-    body_read_timeout_ms,
-    handler,
-  )
+fn handle_accepted_client(
+  client: Socket,
+  factory: factory_supervisor.Supervisor(Worker, process.Subject(Nil)),
+  max_body_size: Int,
+  body_read_timeout_ms: Int,
+  handler: ServerHandler,
+) -> Nil {
+  let worker =
+    Worker(socket: client, max_body_size:, body_read_timeout_ms:, handler:)
+  case factory_supervisor.start_child(factory, worker) {
+    Error(_) -> close_socket(client)
+    Ok(started) ->
+      case controlling_process(client, started.pid) {
+        Error(_) -> {
+          close_socket(client)
+          process.send_exit(started.pid)
+        }
+        Ok(Nil) -> process.send(started.data, Nil)
+      }
+  }
 }
 
 fn start_connection(worker: Worker) -> actor.StartResult(process.Subject(Nil)) {
