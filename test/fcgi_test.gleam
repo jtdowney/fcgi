@@ -66,6 +66,76 @@ fn echo_handler(
   |> response.set_body(fcgi.bytes(bytes_tree.from_string("echo:" <> text)))
 }
 
+fn body_too_large_413_handler(
+  req: Request(fcgi.BodyReader),
+  _ctx: fcgi.Context,
+) -> response.Response(fcgi.ResponseData) {
+  case fcgi.read_all(req.body) {
+    Ok(tree) ->
+      response.new(200)
+      |> response.set_header("content-type", "text/plain")
+      |> response.set_body(fcgi.bytes(tree))
+    Error(fcgi.BodyTooLarge) ->
+      response.new(413)
+      |> response.set_header("content-type", "text/plain")
+      |> response.set_body(fcgi.bytes(bytes_tree.from_string("413 too large")))
+    Error(_) ->
+      response.new(500)
+      |> response.set_body(fcgi.bytes(bytes_tree.new()))
+  }
+}
+
+fn send_buffered(socket: sockets.Socket, request_bytes: BitArray) -> Nil {
+  let assert Ok(_) = sockets.send_bits(socket, request_bytes)
+  Nil
+}
+
+fn send_incremental(socket: sockets.Socket, request_bytes: BitArray) -> Nil {
+  let total = bit_array.byte_size(request_bytes)
+  let split = total / 2
+  let assert Ok(first) = bit_array.slice(request_bytes, 0, split)
+  let assert Ok(second) = bit_array.slice(request_bytes, split, total - split)
+  let assert Ok(_) = sockets.send_bits(socket, first)
+  process.sleep(50)
+  case sockets.send_bits(socket, second) {
+    Ok(Nil) -> Nil
+    Error(_) -> Nil
+  }
+}
+
+fn run_oversize_request(send: fn(sockets.Socket, BitArray) -> Nil) -> String {
+  use path <- helpers.with_temp_socket_path
+  let request_bytes =
+    helpers.request_stream_bytes(
+      request_id: 1,
+      params: [
+        #("REQUEST_METHOD", "POST"),
+        #("CONTENT_LENGTH", "5"),
+        #("CONTENT_TYPE", "text/plain"),
+      ],
+      body: <<"hello":utf8>>,
+      keep_conn: False,
+    )
+
+  let assert Ok(started) =
+    body_too_large_413_handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.max_body_size(4)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect_unix(path)
+  send(socket, request_bytes)
+  let assert Ok(bytes) = test_client.recv_all(socket, 1000)
+  sockets.close_socket(socket)
+  helpers.stop_supervisor(started)
+
+  let records = helpers.decode_all_records(bytes)
+  let stdout_payload = helpers.collect_stdout(records)
+  let assert Ok(text) = bit_array.to_string(stdout_payload)
+  text
+}
+
 fn run_handler_with_body(
   build_body: fn() -> fcgi.ResponseData,
   request_bytes: BitArray,
@@ -472,7 +542,7 @@ pub fn send_file_rejects_negative_limit_test() {
     == Error(fcgi.InvalidRange(offset: 0, limit: option.Some(-3)))
 }
 
-pub fn builder_max_body_size_rejects_oversized_body_test() {
+pub fn builder_max_body_size_surfaces_overflow_to_handler_test() {
   use path <- helpers.with_temp_socket_path
   let request_bytes =
     helpers.request_stream_bytes(
@@ -482,15 +552,8 @@ pub fn builder_max_body_size_rejects_oversized_body_test() {
       keep_conn: False,
     )
 
-  let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
-    response.new(200)
-    |> response.set_body(
-      fcgi.bytes(bytes_tree.from_string("HANDLER RESPONSE IGNORED")),
-    )
-  }
-
   let assert Ok(started) =
-    handler
+    body_too_large_413_handler
     |> fcgi.new
     |> fcgi.listen_unix(path)
     |> fcgi.max_body_size(1)
@@ -503,22 +566,57 @@ pub fn builder_max_body_size_rejects_oversized_body_test() {
   helpers.stop_supervisor(started)
 
   let records = helpers.decode_all_records(bytes)
-  let stdout_records =
-    list.filter(records, fn(record) {
-      case record {
-        protocol.Stdout(_, _) -> True
-        _ -> False
-      }
-    })
-  assert stdout_records == []
-  assert records
-    == [
-      protocol.EndRequest(
-        request_id: 1,
-        app_status: 0,
-        protocol_status: protocol.Overloaded,
-      ),
-    ]
+  assert end_request_for(records, 1)
+  let stdout_payload = helpers.collect_stdout(records)
+  let assert Ok(text) = bit_array.to_string(stdout_payload)
+  birdie.snap(
+    text,
+    "builder_max_body_size_surfaces_overflow_to_handler_payload",
+  )
+}
+
+pub fn builder_max_body_size_accepts_body_at_exact_limit_test() {
+  use path <- helpers.with_temp_socket_path
+  let request_bytes =
+    helpers.request_stream_bytes(
+      request_id: 1,
+      params: [
+        #("REQUEST_METHOD", "POST"),
+        #("CONTENT_LENGTH", "4"),
+        #("CONTENT_TYPE", "text/plain"),
+      ],
+      body: <<"abcd":utf8>>,
+      keep_conn: False,
+    )
+
+  let assert Ok(started) =
+    echo_handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.max_body_size(4)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect_unix(path)
+  let assert Ok(_) = sockets.send_bits(socket, request_bytes)
+  let assert Ok(bytes) = test_client.recv_all(socket, 1000)
+  sockets.close_socket(socket)
+  helpers.stop_supervisor(started)
+
+  let records = helpers.decode_all_records(bytes)
+  let stdout_payload = helpers.collect_stdout(records)
+  let assert Ok(text) = bit_array.to_string(stdout_payload)
+  let assert Ok(#(_headers, body_text)) = string.split_once(text, "\r\n\r\n")
+  assert body_text == "echo:abcd"
+}
+
+pub fn builder_max_body_size_buffered_and_incremental_parity_test() {
+  let buffered_response = run_oversize_request(send_buffered)
+  let incremental_response = run_oversize_request(send_incremental)
+  assert incremental_response == buffered_response
+  birdie.snap(
+    buffered_response,
+    "builder_max_body_size_buffered_and_incremental_parity_payload",
+  )
 }
 
 pub fn handler_panic_returns_500_response_test() {
@@ -1243,31 +1341,8 @@ pub fn keep_conn_false_closes_socket_after_response_test() {
 
 pub fn keep_alive_does_not_loop_when_body_overflows_test() {
   use path <- helpers.with_temp_socket_path
-  let echo_or_413_handler = fn(
-    req: Request(fcgi.BodyReader),
-    _ctx: fcgi.Context,
-  ) {
-    case fcgi.read_all(req.body) {
-      Ok(tree) -> {
-        let bytes = bytes_tree.to_bit_array(tree)
-        let assert Ok(text) = bit_array.to_string(bytes)
-        response.new(200)
-        |> response.set_header("content-type", "text/plain")
-        |> response.set_body(
-          fcgi.bytes(bytes_tree.from_string("echo:" <> text)),
-        )
-      }
-      Error(fcgi.BodyTooLarge) ->
-        response.new(413)
-        |> response.set_header("content-type", "text/plain")
-        |> response.set_body(fcgi.bytes(bytes_tree.from_string("too large")))
-      Error(_) ->
-        response.new(500)
-        |> response.set_body(fcgi.bytes(bytes_tree.new()))
-    }
-  }
   let assert Ok(started) =
-    echo_or_413_handler
+    body_too_large_413_handler
     |> fcgi.new
     |> fcgi.listen_unix(path)
     |> fcgi.max_body_size(4)
@@ -1284,6 +1359,9 @@ pub fn keep_alive_does_not_loop_when_body_overflows_test() {
 
   let records1 = helpers.decode_all_records(resp1)
   assert end_request_for(records1, 1)
+  let stdout_payload = helpers.collect_stdout(records1)
+  let assert Ok(text) = bit_array.to_string(stdout_payload)
+  birdie.snap(text, "keep_alive_does_not_loop_when_body_overflows_payload")
 
   let assert Error(_) = second_send
 }

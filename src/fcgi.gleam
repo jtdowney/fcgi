@@ -100,7 +100,9 @@ pub fn listen_tcp(
 /// `InvalidMaxBodySize(bytes)` for negative values.
 ///
 /// When the peer sends more than this many bytes, the next body read
-/// returns `Error(BodyTooLarge)`.
+/// returns `Error(BodyTooLarge)`. The handler may respond as it sees fit,
+/// but the connection is closed after the response is sent because
+/// remaining body bytes cannot be safely drained.
 ///
 /// Default: 256 MiB.
 pub fn max_body_size(
@@ -692,24 +694,6 @@ fn process_request(
   params: BitArray,
   events: List(handler.Event),
 ) -> Result(Option(process.Subject(BodySnapshot)), Nil) {
-  use <- bool.lazy_guard(
-    when: list.contains(events, handler.BodyTooLarge),
-    return: fn() {
-      logging.log(
-        logging.Warning,
-        "rejecting request: body exceeded max_body_size of "
-          <> int.to_string(worker.max_body_size)
-          <> " bytes",
-      )
-      let _ =
-        send_if_nonempty(
-          worker.socket,
-          handler.encode_overloaded_end(request_id),
-        )
-      Error(Nil)
-    },
-  )
-
   case parse_params(params) {
     Error(message) -> {
       logging.log(logging.Warning, "rejecting request: " <> message)
@@ -718,10 +702,22 @@ fn process_request(
       |> result.replace(option.None)
     }
     Ok(#(req, cgi)) -> {
+      let overflowed = list.contains(events, handler.BodyTooLarge)
       let #(reader, snapshots) = build_body_reader(worker, state, events)
       let response = run_user_handler(worker.handler, req, cgi, reader)
-      send_response(worker.socket, request_id, response)
-      |> result.replace(snapshots)
+      use _ <- result.try(send_response(worker.socket, request_id, response))
+      case overflowed {
+        True -> {
+          logging.log(
+            logging.Warning,
+            "closing connection: body exceeded max_body_size of "
+              <> int.to_string(worker.max_body_size)
+              <> " bytes",
+          )
+          Error(Nil)
+        }
+        False -> Ok(snapshots)
+      }
     }
   }
 }
