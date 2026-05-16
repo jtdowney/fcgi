@@ -60,27 +60,41 @@ pub fn request_stream_bytes(
   body body: BitArray,
   keep_conn keep_conn: Bool,
 ) -> BitArray {
+  let params_data =
+    protocol.encode_name_value_pairs(params)
+    |> bytes_tree.to_bit_array
+  request_stream_bytes_with_params_chunks(
+    request_id:,
+    params_chunks: [params_data],
+    body:,
+    keep_conn:,
+  )
+}
+
+pub fn request_stream_bytes_with_params_chunks(
+  request_id request_id: Int,
+  params_chunks params_chunks: List(BitArray),
+  body body: BitArray,
+  keep_conn keep_conn: Bool,
+) -> BitArray {
   let begin =
     encode_incoming(protocol.BeginRequest(
       request_id:,
       role: protocol.responder_role,
       keep_conn:,
     ))
-  let params_data =
-    protocol.encode_name_value_pairs(params)
-    |> bytes_tree.to_bit_array
-  let params_record =
-    encode_incoming(protocol.Params(request_id:, data: params_data))
   let params_end = encode_incoming(protocol.Params(request_id:, data: <<>>))
   let stdin = encode_incoming(protocol.Stdin(request_id:, data: body))
   let stdin_end = encode_incoming(protocol.Stdin(request_id:, data: <<>>))
-  <<
-    begin:bits,
-    params_record:bits,
-    params_end:bits,
-    stdin:bits,
-    stdin_end:bits,
-  >>
+
+  list.fold(params_chunks, bytes_tree.from_bit_array(begin), fn(acc, chunk) {
+    let record = encode_incoming(protocol.Params(request_id:, data: chunk))
+    bytes_tree.append(acc, record)
+  })
+  |> bytes_tree.append(params_end)
+  |> bytes_tree.append(stdin)
+  |> bytes_tree.append(stdin_end)
+  |> bytes_tree.to_bit_array
 }
 
 pub fn parse_outgoing(buffer: BitArray) -> #(protocol.Outgoing, BitArray) {

@@ -54,6 +54,20 @@ fn echo_post_request_bytes(
   )
 }
 
+fn fragmented_params_baseline_params() -> List(#(String, String)) {
+  [
+    #("REQUEST_METHOD", "POST"),
+    #("PATH_INFO", "/things"),
+    #("QUERY_STRING", "x=1&y=2"),
+    #("HTTP_HOST", "example.test"),
+    #("HTTP_X_TRACE_ID", "abc-123"),
+    #("CONTENT_TYPE", "text/plain"),
+    #("CONTENT_LENGTH", "0"),
+    #("REMOTE_ADDR", "10.0.0.1"),
+    #("SCRIPT_NAME", "/app"),
+  ]
+}
+
 fn echo_handler(
   req: Request(fcgi.BodyReader),
   _ctx: fcgi.Context,
@@ -294,6 +308,32 @@ fn context_dump_handler(
   response.new(200)
   |> response.set_header("content-type", "text/plain")
   |> response.set_body(fcgi.bytes(bytes_tree.from_string(format_context(ctx))))
+}
+
+fn capture_request_and_run(
+  request_bytes: BitArray,
+) -> #(Request(Nil), fcgi.Context) {
+  use path <- helpers.with_temp_socket_path
+  let subject = process.new_subject()
+  let handler = fn(req: Request(fcgi.BodyReader), ctx: fcgi.Context) {
+    process.send(subject, #(request.set_body(req, Nil), ctx))
+    response.new(200)
+    |> response.set_body(fcgi.bytes(bytes_tree.new()))
+  }
+
+  let assert Ok(started) =
+    handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect_unix(path)
+  let assert Ok(_) = sockets.send_bits(socket, request_bytes)
+  let assert Ok(_) = test_client.recv_all(socket, 1000)
+  sockets.close_socket(socket)
+  let assert Ok(captured) = process.receive(subject, 1000)
+  helpers.stop_supervisor(started)
+  captured
 }
 
 fn run_context_handler(params: List(#(String, String))) -> String {
@@ -1732,6 +1772,68 @@ pub fn end_to_end_context_non_numeric_remote_port_becomes_none_test() {
     )
 
   assert run_context_handler(params) == expected
+}
+
+pub fn end_to_end_fragmented_params_split_on_pair_boundary_test() {
+  let params = fragmented_params_baseline_params()
+  let baseline =
+    capture_request_and_run(helpers.request_stream_bytes(
+      request_id: 1,
+      params:,
+      body: <<>>,
+      keep_conn: False,
+    ))
+
+  let chunks =
+    list.map(params, fn(pair) {
+      protocol.encode_name_value_pairs([pair])
+      |> bytes_tree.to_bit_array
+    })
+
+  let fragmented =
+    capture_request_and_run(helpers.request_stream_bytes_with_params_chunks(
+      request_id: 1,
+      params_chunks: chunks,
+      body: <<>>,
+      keep_conn: False,
+    ))
+
+  assert fragmented == baseline
+}
+
+pub fn end_to_end_fragmented_params_split_inside_name_value_sequence_test() {
+  let params = fragmented_params_baseline_params()
+  let baseline =
+    capture_request_and_run(helpers.request_stream_bytes(
+      request_id: 1,
+      params:,
+      body: <<>>,
+      keep_conn: False,
+    ))
+
+  let encoded =
+    protocol.encode_name_value_pairs(params)
+    |> bytes_tree.to_bit_array
+  let total = bit_array.byte_size(encoded)
+  let assert [first_pair_size, second_pair_size, ..] =
+    list.map(params, fn(pair) {
+      bit_array.byte_size(
+        protocol.encode_name_value_pairs([pair]) |> bytes_tree.to_bit_array,
+      )
+    })
+  let split_at = first_pair_size + second_pair_size / 2
+  let assert Ok(first) = bit_array.slice(encoded, 0, split_at)
+  let assert Ok(second) = bit_array.slice(encoded, split_at, total - split_at)
+
+  let fragmented =
+    capture_request_and_run(helpers.request_stream_bytes_with_params_chunks(
+      request_id: 1,
+      params_chunks: [first, second],
+      body: <<>>,
+      keep_conn: False,
+    ))
+
+  assert fragmented == baseline
 }
 
 pub fn listen_tcp_accepts_request_test() {
