@@ -154,8 +154,9 @@ fn handle_record(
 
     Receiving(recv), protocol.BeginRequest(id, _, _) ->
       handle_begin_request_busy(recv, id)
-    Receiving(recv), protocol.Params(id, data) if id == recv.request_id ->
-      handle_params(recv, data)
+    Receiving(recv), protocol.Params(id, data)
+      if id == recv.request_id && !recv.started
+    -> handle_params(recv, data)
     Receiving(recv), protocol.Stdin(id, data) if id == recv.request_id ->
       handle_stdin(recv, data, max_body_size)
     Receiving(recv), protocol.AbortRequest(id) if id == recv.request_id ->

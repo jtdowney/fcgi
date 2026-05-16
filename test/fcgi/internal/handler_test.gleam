@@ -811,3 +811,67 @@ pub fn drops_response_headers_with_crlf_in_name_test() {
     "drops_response_headers_with_crlf_in_name",
   )
 }
+
+pub fn duplicate_params_terminator_does_not_emit_second_start_test() {
+  let begin =
+    helpers.encode_incoming(protocol.BeginRequest(
+      request_id: 1,
+      role: protocol.responder_role,
+      keep_conn: True,
+    ))
+  let real_params =
+    helpers.encode_incoming(protocol.Params(
+      request_id: 1,
+      data: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+        |> bytes_tree.to_bit_array,
+    ))
+  let params_end =
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+  let bytes = <<begin:bits, real_params:bits, params_end:bits, params_end:bits>>
+
+  let outcome =
+    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+
+  let start_count =
+    list.count(outcome.events, fn(event) {
+      case event {
+        handler.Start(_, _, _) -> True
+        _ -> False
+      }
+    })
+  assert start_count == 1
+}
+
+pub fn non_empty_params_after_terminator_is_ignored_test() {
+  let begin =
+    helpers.encode_incoming(protocol.BeginRequest(
+      request_id: 1,
+      role: protocol.responder_role,
+      keep_conn: True,
+    ))
+  let initial_params =
+    protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
+    |> bytes_tree.to_bit_array
+  let real_params =
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: initial_params))
+  let params_end =
+    helpers.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
+  let late_params =
+    helpers.encode_incoming(protocol.Params(
+      request_id: 1,
+      data: protocol.encode_name_value_pairs([#("INJECTED", "yes")])
+        |> bytes_tree.to_bit_array,
+    ))
+  let bytes = <<
+    begin:bits,
+    real_params:bits,
+    params_end:bits,
+    late_params:bits,
+  >>
+
+  let outcome =
+    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+
+  let assert [handler.Start(_, params, _)] = outcome.events
+  assert params == initial_params
+}
