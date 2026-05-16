@@ -2,8 +2,12 @@ import fcgi/internal/protocol
 import gleam/bit_array
 import gleam/bytes_tree
 import gleam/list
+import gleam/string
 import qcheck
 import support/helpers
+
+@external(erlang, "crypto", "strong_rand_bytes")
+fn strong_rand_bytes(n: Int) -> BitArray
 
 fn outgoing_fixed_size_record_generator() -> qcheck.Generator(protocol.Outgoing) {
   qcheck.from_generators(end_request_generator(), [unknown_type_generator()])
@@ -56,24 +60,9 @@ fn name_value_pairs_generator() -> qcheck.Generator(List(#(String, String))) {
 }
 
 fn name_value_pair_generator() -> qcheck.Generator(#(String, String)) {
-  use name <- qcheck.bind(short_or_long_string_generator())
-  use value <- qcheck.map(short_or_long_string_generator())
+  use name <- qcheck.bind(short_name_generator())
+  use value <- qcheck.map(short_name_generator())
   #(name, value)
-}
-
-fn short_or_long_string_generator() -> qcheck.Generator(String) {
-  qcheck.from_generators(
-    qcheck.generic_string(
-      qcheck.printable_ascii_codepoint(),
-      qcheck.bounded_int(0, 127),
-    ),
-    [
-      qcheck.generic_string(
-        qcheck.printable_ascii_codepoint(),
-        qcheck.bounded_int(128, 200),
-      ),
-    ],
-  )
 }
 
 fn incoming_data_record_generator() -> qcheck.Generator(protocol.Incoming) {
@@ -131,7 +120,7 @@ fn chunk_stdout_input_generator() -> qcheck.Generator(#(Int, BitArray)) {
   use id <- qcheck.bind(request_id_generator())
   use body <- qcheck.map(qcheck.generic_byte_aligned_bit_array(
     qcheck.bounded_int(0, 255),
-    qcheck.bounded_int(0, 70_000),
+    qcheck.bounded_int(0, 1024),
   ))
   #(id, body)
 }
@@ -181,6 +170,31 @@ pub fn name_value_pairs_round_trip_unicode_test() {
   assert decoded == pairs
 }
 
+pub fn name_value_pairs_handles_length_prefix_boundary_test() {
+  let max_short = string.repeat("a", 127)
+  let min_long = string.repeat("b", 128)
+  let cases = [
+    [],
+    [#("", "")],
+    [#("k", "v")],
+    [#(max_short, max_short)],
+    [#(min_long, "v")],
+    [#("k", min_long)],
+    [#(min_long, min_long)],
+    [
+      #("k1", "v1"),
+      #(max_short, "v"),
+      #("k", min_long),
+      #(min_long, max_short),
+    ],
+  ]
+  list.each(cases, fn(pairs) {
+    let bytes = protocol.encode_name_value_pairs(pairs) |> bytes_tree.to_bit_array
+    let assert Ok(decoded) = protocol.parse_name_value_pairs(bytes)
+    assert decoded == pairs
+  })
+}
+
 pub fn incoming_data_records_round_trip_test() {
   use record <- qcheck.run(
     qcheck.default_config() |> qcheck.with_test_count(100),
@@ -206,7 +220,7 @@ pub fn outgoing_data_records_round_trip_test() {
 
 pub fn chunk_stdout_records_round_trip_test() {
   use #(id, body) <- qcheck.run(
-    qcheck.default_config() |> qcheck.with_test_count(10),
+    qcheck.default_config() |> qcheck.with_test_count(100),
     chunk_stdout_input_generator(),
   )
   let records = protocol.chunk_stdout(id, body)
@@ -221,6 +235,35 @@ pub fn chunk_stdout_records_round_trip_test() {
       <<acc:bits, data:bits>>
     })
   assert concatenated == body
+}
+
+pub fn chunk_stdout_handles_boundary_sizes_test() {
+  let id = 7
+  let sizes = [
+    0,
+    1,
+    protocol.max_record_content_size - 1,
+    protocol.max_record_content_size,
+    protocol.max_record_content_size + 1,
+    2 * protocol.max_record_content_size,
+    2 * protocol.max_record_content_size + 1,
+    3 * protocol.max_record_content_size,
+  ]
+  list.each(sizes, fn(size) {
+    let body = strong_rand_bytes(size)
+    let records = protocol.chunk_stdout(id, body)
+    list.each(records, fn(record) {
+      let assert protocol.Stdout(record_id, data) = record
+      assert record_id == id
+      assert bit_array.byte_size(data) <= protocol.max_record_content_size
+    })
+    let concatenated =
+      list.fold(records, <<>>, fn(acc, record) {
+        let assert protocol.Stdout(_, data) = record
+        <<acc:bits, data:bits>>
+      })
+    assert concatenated == body
+  })
 }
 
 pub fn parse_record_skips_padding_to_next_record_test() {
