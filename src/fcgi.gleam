@@ -288,7 +288,7 @@ pub type StartError {
   ListenerError(reason: String)
   /// `max_body_size` was set to a negative value.
   InvalidMaxBodySize(bytes: Int)
-  /// `body_read_timeout` was set to a negative value.
+  /// `body_read_timeout` was set to zero or a negative value.
   InvalidBodyReadTimeout(milliseconds: Int)
 }
 
