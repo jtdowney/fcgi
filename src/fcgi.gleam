@@ -725,7 +725,10 @@ fn process_request(
         |> result.map(fn(snap) { snap.aborted })
         |> result.unwrap(False)
 
-      use <- bool.guard(when: aborted, return: Error(Nil))
+      use <- bool.lazy_guard(when: aborted, return: fn() {
+        dispose_response(response)
+        Error(Nil)
+      })
       use _ <- result.try(send_response(worker.socket, request_id, response))
       use <- bool.lazy_guard(when: overflowed, return: fn() {
         logging.log(
@@ -980,6 +983,13 @@ fn run_user_handler(
   }
 }
 
+fn dispose_response(response: Response(ResponseData)) -> Nil {
+  case response.body {
+    File(handle:, ..) -> close_file(handle)
+    Bytes(_) | Stream(_) -> Nil
+  }
+}
+
 fn send_response(
   socket: Socket,
   request_id: Int,
@@ -994,8 +1004,9 @@ fn send_response(
       send_if_nonempty(socket, combined)
     }
     File(handle, offset, length) -> {
+      use <- exception.defer(fn() { close_file(handle) })
       use _ <- result.try(send_tree(socket, header))
-      use _ <- result.try(send_file_body(
+      use _ <- result.try(send_via_sendfile(
         socket,
         request_id,
         handle,
@@ -1021,17 +1032,6 @@ fn send_response(
       send_tree(socket, terminator)
     }
   }
-}
-
-fn send_file_body(
-  socket: Socket,
-  request_id: Int,
-  handle: Handle,
-  offset: Int,
-  length: Int,
-) -> Result(Nil, Nil) {
-  use <- exception.defer(fn() { close_file(handle) })
-  send_via_sendfile(socket, request_id, handle, offset, length)
 }
 
 fn send_via_sendfile(
