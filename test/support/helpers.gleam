@@ -27,26 +27,30 @@ pub fn with_temp_file(fun: fn(String) -> a) -> a {
 }
 
 pub fn encode_incoming(record: protocol.Incoming) -> BitArray {
-  let tree = case record {
+  let result = case record {
     protocol.BeginRequest(id, role, keep_conn) -> {
       let flags = case keep_conn {
         True -> 1
         False -> 0
       }
       let body = <<role:size(16), flags:size(8), 0:size(40)>>
-      protocol.frame_bits(1, id, body)
+      protocol.encode_frame(1, id, bytes_tree.from_bit_array(body))
     }
-    protocol.AbortRequest(id) -> protocol.frame_bits(2, id, <<>>)
-    protocol.Params(id, data) -> protocol.frame_bits(4, id, data)
-    protocol.Stdin(id, data) -> protocol.frame_bits(5, id, data)
+    protocol.AbortRequest(id) ->
+      protocol.encode_frame(2, id, bytes_tree.from_bit_array(<<>>))
+    protocol.Params(id, data) ->
+      protocol.encode_frame(4, id, bytes_tree.from_bit_array(data))
+    protocol.Stdin(id, data) ->
+      protocol.encode_frame(5, id, bytes_tree.from_bit_array(data))
     protocol.GetValues(names) -> {
       let pairs = list.map(names, fn(name) { #(name, "") })
-      protocol.frame_tree(9, 0, protocol.encode_name_value_pairs(pairs))
+      protocol.encode_frame(9, 0, protocol.encode_name_value_pairs(pairs))
     }
     protocol.IncomingUnknown(id, type_byte) ->
-      protocol.frame_bits(type_byte, id, <<>>)
+      protocol.encode_frame(type_byte, id, bytes_tree.from_bit_array(<<>>))
   }
 
+  let assert Ok(tree) = result
   bytes_tree.to_bit_array(tree)
 }
 

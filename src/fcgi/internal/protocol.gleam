@@ -25,7 +25,11 @@ pub type Status {
   UnknownRole
 }
 
-pub fn encode_record(record: Outgoing) -> BytesTree {
+pub type FrameError {
+  ContentLengthExceedsMax(content_length: Int)
+}
+
+pub fn encode_record(record: Outgoing) -> Result(BytesTree, FrameError) {
   case record {
     EndRequest(id, app_status, protocol_status) -> {
       let body = <<
@@ -33,31 +37,29 @@ pub fn encode_record(record: Outgoing) -> BytesTree {
         status_to_int(protocol_status):size(8),
         0:size(24),
       >>
-      frame_bits(3, id, body)
+      encode_frame(3, id, bytes_tree.from_bit_array(body))
     }
-    Stdout(id, data) -> frame_bits(6, id, data)
-    GetValuesResult(pairs) -> frame_tree(10, 0, encode_name_value_pairs(pairs))
+    Stdout(id, data) -> encode_frame(6, id, bytes_tree.from_bit_array(data))
+    GetValuesResult(pairs) ->
+      encode_frame(10, 0, encode_name_value_pairs(pairs))
     UnknownType(type_byte) -> {
       let body = <<type_byte:size(8), 0:size(56)>>
-      frame_bits(11, 0, body)
+      encode_frame(11, 0, bytes_tree.from_bit_array(body))
     }
   }
 }
 
-pub fn frame_bits(
-  record_type: Int,
-  request_id: Int,
-  body: BitArray,
-) -> BytesTree {
-  frame_tree(record_type, request_id, bytes_tree.from_bit_array(body))
-}
-
-pub fn frame_tree(
+pub fn encode_frame(
   record_type: Int,
   request_id: Int,
   body: BytesTree,
-) -> BytesTree {
+) -> Result(BytesTree, FrameError) {
   let content_length = bytes_tree.byte_size(body)
+  use <- bool.guard(
+    when: content_length > max_record_content_size,
+    return: Error(ContentLengthExceedsMax(content_length)),
+  )
+
   let padding_length = padding_for(content_length)
   let header = <<
     supported_version:size(8),
@@ -68,9 +70,12 @@ pub fn frame_tree(
     0:size(8),
   >>
   let padding = <<0:size({ padding_length * 8 })>>
-  bytes_tree.from_bit_array(header)
-  |> bytes_tree.append_tree(body)
-  |> bytes_tree.append(padding)
+
+  let frame =
+    bytes_tree.from_bit_array(header)
+    |> bytes_tree.append_tree(body)
+    |> bytes_tree.append(padding)
+  Ok(frame)
 }
 
 fn padding_for(content_length: Int) -> Int {
@@ -112,10 +117,19 @@ fn encode_length(n: Int) -> BitArray {
   }
 }
 
+/// Encode just the FastCGI `STDOUT` record header for a streaming
+/// payload of `content_length` bytes, returning the header bytes and
+/// the padding length the caller must emit after the payload. Returns
+/// `Error(ContentLengthExceedsMax(_))` if `content_length` exceeds
+/// `max_record_content_size`.
 pub fn encode_stdout_frame_header(
   request_id: Int,
   content_length: Int,
-) -> #(BitArray, Int) {
+) -> Result(#(BitArray, Int), FrameError) {
+  use <- bool.guard(
+    when: content_length > max_record_content_size,
+    return: Error(ContentLengthExceedsMax(content_length)),
+  )
   let padding_length = padding_for(content_length)
   let header = <<
     supported_version:size(8),
@@ -125,7 +139,7 @@ pub fn encode_stdout_frame_header(
     padding_length:size(8),
     0:size(8),
   >>
-  #(header, padding_length)
+  Ok(#(header, padding_length))
 }
 
 pub fn chunk_stdout(request_id: Int, body: BitArray) -> List(Outgoing) {

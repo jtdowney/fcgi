@@ -164,7 +164,8 @@ fn handle_record(
 
     _, protocol.GetValues(names) -> handle_get_values(state, names)
     _, protocol.IncomingUnknown(0, type_byte) -> {
-      let reply = protocol.encode_record(protocol.UnknownType(type_byte:))
+      let assert Ok(reply) =
+        protocol.encode_record(protocol.UnknownType(type_byte:))
       Action(state:, outgoing: reply, events: [], terminate: option.None)
     }
 
@@ -203,7 +204,7 @@ fn handle_begin_request_idle(
         terminate: option.None,
       )
     False -> {
-      let reply =
+      let assert Ok(reply) =
         protocol.encode_record(protocol.EndRequest(
           request_id: id,
           app_status: 0,
@@ -220,7 +221,7 @@ fn handle_begin_request_idle(
 }
 
 fn handle_begin_request_busy(recv: ReceivingState, id: Int) -> Action {
-  let reply =
+  let assert Ok(reply) =
     protocol.encode_record(protocol.EndRequest(
       request_id: id,
       app_status: 0,
@@ -404,7 +405,7 @@ fn handle_stdin_overflow(recv: ReceivingState) -> Action {
 }
 
 fn handle_abort(request_id: Int) -> Action {
-  let reply =
+  let assert Ok(reply) =
     protocol.encode_record(protocol.EndRequest(
       request_id:,
       app_status: 0,
@@ -420,7 +421,8 @@ fn handle_abort(request_id: Int) -> Action {
 
 fn handle_get_values(state: State, names: List(String)) -> Action {
   let pairs = list.filter_map(names, lookup_capability)
-  let reply = protocol.encode_record(protocol.GetValuesResult(pairs:))
+  let assert Ok(reply) =
+    protocol.encode_record(protocol.GetValuesResult(pairs:))
   Action(state:, outgoing: reply, events: [], terminate: option.None)
 }
 
@@ -456,7 +458,10 @@ pub fn encode_stdout_chunk(request_id: Int, payload: BytesTree) -> BytesTree {
   let size = bytes_tree.byte_size(payload)
   use <- bool.guard(when: size == 0, return: bytes_tree.new())
   case size <= protocol.max_record_content_size {
-    True -> protocol.frame_tree(6, request_id, payload)
+    True -> {
+      let assert Ok(tree) = protocol.encode_frame(6, request_id, payload)
+      tree
+    }
     False ->
       encode_records(protocol.chunk_stdout(
         request_id,
@@ -466,16 +471,19 @@ pub fn encode_stdout_chunk(request_id: Int, payload: BytesTree) -> BytesTree {
 }
 
 pub fn encode_overloaded_end(request_id: Int) -> BytesTree {
-  protocol.encode_record(protocol.EndRequest(
-    request_id:,
-    app_status: 0,
-    protocol_status: protocol.Overloaded,
-  ))
+  let assert Ok(tree) =
+    protocol.encode_record(protocol.EndRequest(
+      request_id:,
+      app_status: 0,
+      protocol_status: protocol.Overloaded,
+    ))
+  tree
 }
 
 fn encode_records(records: List(protocol.Outgoing)) -> BytesTree {
   list.fold(records, bytes_tree.new(), fn(acc, record) {
-    bytes_tree.append_tree(acc, protocol.encode_record(record))
+    let assert Ok(tree) = protocol.encode_record(record)
+    bytes_tree.append_tree(acc, tree)
   })
 }
 
