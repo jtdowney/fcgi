@@ -295,7 +295,7 @@ pub fn parse_record_returns_trailing_bytes_as_rest_test() {
 pub fn parse_record_rejects_unsupported_version_test() {
   let bytes = <<
     2:size(8),
-    1:size(8),
+    protocol.begin_request_type:size(8),
     1:size(16),
     8:size(16),
     0:size(8),
@@ -309,14 +309,18 @@ pub fn parse_record_rejects_unsupported_version_test() {
 }
 
 pub fn parse_record_returns_need_more_for_truncated_header_test() {
-  assert protocol.parse_record(<<1:size(8), 1:size(8), 0:size(16)>>)
+  assert protocol.parse_record(<<
+      1:size(8),
+      protocol.begin_request_type:size(8),
+      0:size(16),
+    >>)
     == protocol.NeedMore
 }
 
 pub fn parse_record_returns_need_more_for_truncated_body_test() {
   let bytes = <<
     1:size(8),
-    1:size(8),
+    protocol.begin_request_type:size(8),
     1:size(16),
     8:size(16),
     0:size(8),
@@ -330,7 +334,7 @@ pub fn parse_record_returns_need_more_for_truncated_body_test() {
 pub fn parse_record_rejects_malformed_begin_request_test() {
   let bytes = <<
     1:size(8),
-    1:size(8),
+    protocol.begin_request_type:size(8),
     1:size(16),
     3:size(16),
     5:size(8),
@@ -371,24 +375,33 @@ pub fn parse_name_value_pairs_rejects_truncated_length_prefix_test() {
 pub fn frame_bits_at_max_content_size_succeeds_test() {
   let body = <<0:size({ protocol.max_record_content_size * 8 })>>
   let assert Ok(tree) =
-    protocol.encode_frame(6, 1, bytes_tree.from_bit_array(body))
+    protocol.encode_frame(
+      protocol.stdout_type,
+      1,
+      bytes_tree.from_bit_array(body),
+    )
   let framed = bytes_tree.to_bit_array(tree)
   let assert <<
     1:size(8),
-    6:size(8),
+    record_type:size(8),
     1:size(16),
     content_length:size(16),
     _padding:size(8),
     0:size(8),
     _rest:bits,
   >> = framed
+  assert record_type == protocol.stdout_type
   assert content_length == protocol.max_record_content_size
 }
 
 pub fn frame_bits_above_max_content_size_errors_test() {
   let oversize = protocol.max_record_content_size + 1
   let body = <<0:size({ oversize * 8 })>>
-  assert protocol.encode_frame(6, 1, bytes_tree.from_bit_array(body))
+  assert protocol.encode_frame(
+      protocol.stdout_type,
+      1,
+      bytes_tree.from_bit_array(body),
+    )
     == Error(protocol.ContentLengthExceedsMax(oversize))
 }
 

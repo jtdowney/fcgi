@@ -522,7 +522,7 @@ pub fn get_values_filters_unknown_names_test() {
 pub fn unsupported_version_closes_connection_test() {
   let bytes = <<
     2:size(8),
-    1:size(8),
+    protocol.begin_request_type:size(8),
     1:size(16),
     0:size(16),
     0:size(8),
@@ -539,7 +539,7 @@ pub fn unsupported_version_closes_connection_test() {
 pub fn malformed_begin_request_closes_connection_test() {
   let bytes = <<
     1:size(8),
-    1:size(8),
+    protocol.begin_request_type:size(8),
     1:size(16),
     4:size(16),
     0:size(8),

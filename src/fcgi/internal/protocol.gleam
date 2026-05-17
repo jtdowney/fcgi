@@ -9,7 +9,29 @@ pub const max_record_content_size = 65_535
 
 pub const responder_role = 1
 
+pub const begin_request_type = 1
+
+pub const abort_request_type = 2
+
+pub const end_request_type = 3
+
+pub const params_type = 4
+
+pub const stdin_type = 5
+
+pub const stdout_type = 6
+
+pub const get_values_type = 9
+
+pub const get_values_result_type = 10
+
+pub const unknown_type = 11
+
 const supported_version = 1
+
+const record_alignment = 8
+
+const long_length_threshold = 128
 
 pub type Outgoing {
   EndRequest(request_id: Int, app_status: Int, protocol_status: Status)
@@ -37,14 +59,15 @@ pub fn encode_record(record: Outgoing) -> Result(BytesTree, FrameError) {
         status_to_int(protocol_status):size(8),
         0:size(24),
       >>
-      encode_frame(3, id, bytes_tree.from_bit_array(body))
+      encode_frame(end_request_type, id, bytes_tree.from_bit_array(body))
     }
-    Stdout(id, data) -> encode_frame(6, id, bytes_tree.from_bit_array(data))
+    Stdout(id, data) ->
+      encode_frame(stdout_type, id, bytes_tree.from_bit_array(data))
     GetValuesResult(pairs) ->
-      encode_frame(10, 0, encode_name_value_pairs(pairs))
+      encode_frame(get_values_result_type, 0, encode_name_value_pairs(pairs))
     UnknownType(type_byte) -> {
       let body = <<type_byte:size(8), 0:size(56)>>
-      encode_frame(11, 0, bytes_tree.from_bit_array(body))
+      encode_frame(unknown_type, 0, bytes_tree.from_bit_array(body))
     }
   }
 }
@@ -79,10 +102,10 @@ pub fn encode_frame(
 }
 
 fn padding_for(content_length: Int) -> Int {
-  let remainder = content_length % 8
+  let remainder = content_length % record_alignment
   case remainder {
     0 -> 0
-    _ -> 8 - remainder
+    _ -> record_alignment - remainder
   }
 }
 
@@ -111,7 +134,7 @@ pub fn encode_name_value_pairs(pairs: List(#(String, String))) -> BytesTree {
 }
 
 fn encode_length(n: Int) -> BitArray {
-  case n < 128 {
+  case n < long_length_threshold {
     True -> <<n:size(8)>>
     False -> <<1:size(1), n:size(31)>>
   }
@@ -133,7 +156,7 @@ pub fn encode_stdout_frame_header(
   let padding_length = padding_for(content_length)
   let header = <<
     supported_version:size(8),
-    6:size(8),
+    stdout_type:size(8),
     request_id:size(16),
     content_length:size(16),
     padding_length:size(8),

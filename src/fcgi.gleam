@@ -29,6 +29,10 @@ const default_max_body_size = 268_435_456
 
 const socket_owner_transfer_timeout_ms = 5000
 
+const path_janitor_init_timeout_ms = 1000
+
+const accept_retry_backoff_ms = 100
+
 /// Listen address set on a `Builder` via `listen_unix` or `listen_tcp`.
 pub opaque type Address {
   PathAddress(path: String)
@@ -456,7 +460,7 @@ fn path_janitor_supervised(
 }
 
 fn start_path_janitor(path: String) -> actor.StartResult(Nil) {
-  actor.new_with_initialiser(1000, fn(_subject) {
+  actor.new_with_initialiser(path_janitor_init_timeout_ms, fn(_subject) {
     process.trap_exits(True)
     let selector =
       process.new_selector()
@@ -574,7 +578,7 @@ fn accept_loop(
             logging.Warning,
             "accept failed: " <> name <> ", retrying",
           )
-          process.sleep(100)
+          process.sleep(accept_retry_backoff_ms)
           accept_loop(
             listen_socket,
             factory,
