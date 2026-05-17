@@ -3,7 +3,7 @@
 -include_lib("kernel/include/file.hrl").
 
 -export([open_and_size/1, sendfile/4, listen_tcp/2, listen_unix/1, close_socket/1, send/2,
-         controlling_process/2, recv/3, delete_path/1, close_file/1]).
+         controlling_process/2, recv/3, delete_path/1, close_file/1, socket_port/1]).
 
 -define(LISTEN_OPTS, [binary, {active, false}, {packet, raw}, {backlog, 1024}]).
 
@@ -90,6 +90,14 @@ is_stale_socket(PathBin) ->
 close_socket(Socket) ->
     _ = gen_tcp:close(Socket),
     nil.
+
+socket_port(Socket) ->
+    case inet:port(Socket) of
+        {ok, Port} ->
+            {ok, Port};
+        {error, R} ->
+            {error, {posix, R}}
+    end.
 
 send(Socket, Data) ->
     case gen_tcp:send(Socket, Data) of

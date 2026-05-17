@@ -1868,10 +1868,6 @@ pub fn end_to_end_fragmented_params_split_inside_name_value_sequence_test() {
 }
 
 pub fn listen_tcp_accepts_request_test() {
-  let assert Ok(probe) = sockets.bind_tcp("127.0.0.1", 0)
-  let assert Ok(port) = test_client.socket_port(probe)
-  sockets.close_socket(probe)
-
   let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
     response.new(200)
     |> response.set_header("content-type", "text/plain")
@@ -1881,8 +1877,10 @@ pub fn listen_tcp_accepts_request_test() {
   let assert Ok(started) =
     handler
     |> fcgi.new
-    |> fcgi.listen_tcp(host: "127.0.0.1", port: port)
+    |> fcgi.listen_tcp(host: "127.0.0.1", port: 0)
     |> fcgi.start
+
+  let assert option.Some(port) = started.data.bound_port
 
   let assert Ok(socket) = test_client.connect_tcp("127.0.0.1", port)
   let assert Ok(_) = sockets.send_bits(socket, simple_get_request_bytes())
@@ -1895,6 +1893,22 @@ pub fn listen_tcp_accepts_request_test() {
   let assert Ok(text) = bit_array.to_string(stdout_payload)
   let assert Ok(#(_headers, body_text)) = string.split_once(text, "\r\n\r\n")
   assert body_text == "hello-tcp"
+}
+
+pub fn listen_tcp_bound_port_is_none_for_unix_test() {
+  use path <- helpers.with_temp_socket_path
+  let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
+    response.new(200) |> response.set_body(fcgi.bytes(bytes_tree.new()))
+  }
+
+  let assert Ok(started) =
+    handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.start
+
+  assert started.data.bound_port == option.None
+  helpers.stop_supervisor(started)
 }
 
 pub fn listen_tcp_rejects_invalid_host_test() {

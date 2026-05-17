@@ -292,10 +292,17 @@ pub type StartError {
   InvalidBodyReadTimeout(milliseconds: Int)
 }
 
+/// Running server returned by `start`. `bound_port` is `Some(port)` for a
+/// TCP listener (useful when `listen_tcp` was given port `0` and the
+/// kernel chose an ephemeral port) and `None` for a Unix-domain listener.
+pub type Server {
+  Server(supervisor: static_supervisor.Supervisor, bound_port: Option(Int))
+}
+
 /// Start the server.
 pub fn start(
   builder: Builder(Address),
-) -> Result(actor.Started(static_supervisor.Supervisor), StartError) {
+) -> Result(actor.Started(Server), StartError) {
   use <- bool.guard(
     when: builder.max_body_size < 0,
     return: Error(InvalidMaxBodySize(builder.max_body_size)),
@@ -306,6 +313,7 @@ pub fn start(
   )
   let address = builder.address
   use socket <- result.try(listen_on_address(address))
+  use bound_port <- result.try(resolve_bound_port(socket, address))
   let factory_name = process.new_name(prefix: "fcgi_server_factory")
   let handler = fn(req: Request(Nil), ctx: Context, reader: BodyReader) {
     builder.handler(request.set_body(req, reader), ctx)
@@ -329,7 +337,8 @@ pub fn start(
         logging.Info,
         "fcgi listening on " <> describe_address(address),
       )
-      Ok(started)
+      let server = Server(supervisor: started.data, bound_port:)
+      Ok(actor.Started(pid: started.pid, data: server))
     }
     Error(error) -> {
       process.unlink(started.pid)
@@ -346,7 +355,7 @@ pub fn start(
 /// OTP supervisor.
 pub fn supervised(
   builder: Builder(Address),
-) -> supervision.ChildSpecification(static_supervisor.Supervisor) {
+) -> supervision.ChildSpecification(Server) {
   supervision.supervisor(fn() {
     start(builder)
     |> result.map_error(fn(error) {
@@ -389,6 +398,25 @@ fn listen_on_address(address: Address) -> Result(Socket, StartError) {
             ListenerError("listen failed: " <> describe_transport_error(error))
         }
       })
+  }
+}
+
+fn resolve_bound_port(
+  socket: Socket,
+  address: Address,
+) -> Result(Option(Int), StartError) {
+  case address {
+    PathAddress(_) -> Ok(option.None)
+    TcpAddress(_, _) ->
+      case do_socket_port(socket) {
+        Ok(port) -> Ok(option.Some(port))
+        Error(error) -> {
+          close_socket(socket)
+          Error(ListenerError(
+            "bound port lookup failed: " <> describe_transport_error(error),
+          ))
+        }
+      }
   }
 }
 
@@ -1341,6 +1369,9 @@ fn send_bits(socket: Socket, data: BitArray) -> Result(Nil, Nil)
 
 @external(erlang, "fcgi_ffi", "send")
 fn send_tree(socket: Socket, data: BytesTree) -> Result(Nil, Nil)
+
+@external(erlang, "fcgi_ffi", "socket_port")
+fn do_socket_port(socket: Socket) -> Result(Int, SocketError)
 
 @external(erlang, "fcgi_ffi", "sendfile")
 fn sendfile(
