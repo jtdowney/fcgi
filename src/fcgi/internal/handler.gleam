@@ -434,22 +434,22 @@ fn lookup_capability(name: String) -> Result(#(String, String), Nil) {
   }
 }
 
-pub fn encode_response_header(
+pub fn encode_response_headers(
   request_id: Int,
   resp: Response(body),
 ) -> BytesTree {
-  encode_stdout_chunk(request_id, encode_headers(resp))
+  encode_stdout_chunk(request_id, encode_http_headers(resp))
 }
 
-pub fn encode_response_terminator(request_id: Int) -> BytesTree {
-  let terminator = protocol.Stdout(request_id, <<>>)
-  let end =
+pub fn encode_response_end_records(request_id: Int) -> BytesTree {
+  let stdout_end = protocol.Stdout(request_id, <<>>)
+  let request_end =
     protocol.EndRequest(
       request_id:,
       app_status: 0,
       protocol_status: protocol.RequestComplete,
     )
-  encode_records([terminator, end])
+  encode_records([stdout_end, request_end])
 }
 
 pub fn encode_stdout_chunk(request_id: Int, payload: BytesTree) -> BytesTree {
@@ -457,7 +457,11 @@ pub fn encode_stdout_chunk(request_id: Int, payload: BytesTree) -> BytesTree {
   use <- bool.guard(when: size == 0, return: bytes_tree.new())
   case size <= protocol.max_record_content_size {
     True ->
-      protocol.frame_tree_unchecked(protocol.stdout_type, request_id, payload)
+      protocol.encode_record_tree_unchecked(
+        protocol.stdout_type,
+        request_id,
+        payload,
+      )
     False ->
       encode_records(protocol.chunk_stdout(
         request_id,
@@ -480,9 +484,12 @@ fn encode_records(records: List(protocol.Outgoing)) -> BytesTree {
   })
 }
 
-fn encode_headers(resp: Response(anything)) -> BytesTree {
+fn encode_http_headers(resp: Response(body)) -> BytesTree {
   let start =
-    bytes_tree.from_string("Status: " <> int.to_string(resp.status) <> "\r\n")
+    bytes_tree.from_string("Status: ")
+    |> bytes_tree.append_string(int.to_string(resp.status))
+    |> bytes_tree.append_string("\r\n")
+
   let with_headers =
     list.fold(resp.headers, start, fn(acc, header) {
       let #(name, value) = header
@@ -496,6 +503,7 @@ fn encode_headers(resp: Response(anything)) -> BytesTree {
         False -> acc
       }
     })
+
   bytes_tree.append_string(with_headers, "\r\n")
 }
 

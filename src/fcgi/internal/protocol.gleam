@@ -55,32 +55,32 @@ pub fn encode_record(record: Outgoing) -> BytesTree {
         status_to_int(protocol_status):size(8),
         0:size(24),
       >>
-      frame_bits_unchecked(end_request_type, id, body)
+      encode_record_bits_unchecked(end_request_type, id, body)
     }
-    Stdout(id, data) -> frame_bits_unchecked(stdout_type, id, data)
+    Stdout(id, data) -> encode_record_bits_unchecked(stdout_type, id, data)
     GetValuesResult(pairs) ->
-      frame_tree_unchecked(
+      encode_record_tree_unchecked(
         get_values_result_type,
         0,
         encode_name_value_pairs(pairs),
       )
     UnknownType(type_byte) -> {
       let body = <<type_byte:size(8), 0:size(56)>>
-      frame_bits_unchecked(unknown_type, 0, body)
+      encode_record_bits_unchecked(unknown_type, 0, body)
     }
   }
 }
 
-pub fn frame_bits_unchecked(
+pub fn encode_record_bits_unchecked(
   record_type: Int,
   request_id: Int,
   body: BitArray,
 ) -> BytesTree {
   bytes_tree.from_bit_array(body)
-  |> frame_tree_unchecked(record_type, request_id, _)
+  |> encode_record_tree_unchecked(record_type, request_id, _)
 }
 
-pub fn frame_tree_unchecked(
+pub fn encode_record_tree_unchecked(
   record_type: Int,
   request_id: Int,
   body: BytesTree,
@@ -144,7 +144,7 @@ fn encode_length(n: Int) -> BitArray {
 /// payload of `content_length` bytes, returning the header bytes and
 /// the padding length the caller must emit after the payload. Caller
 /// must ensure `content_length <= max_record_content_size`.
-pub fn encode_stdout_frame_header(
+pub fn encode_stdout_record_header(
   request_id: Int,
   content_length: Int,
 ) -> #(BitArray, Int) {

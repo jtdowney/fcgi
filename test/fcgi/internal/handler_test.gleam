@@ -15,9 +15,9 @@ fn response_payload_string(
 ) -> String {
   let bytes =
     bytes_tree.new()
-    |> bytes_tree.append_tree(handler.encode_response_header(1, resp))
+    |> bytes_tree.append_tree(handler.encode_response_headers(1, resp))
     |> bytes_tree.append_tree(handler.encode_stdout_chunk(1, body_bytes))
-    |> bytes_tree.append_tree(handler.encode_response_terminator(1))
+    |> bytes_tree.append_tree(handler.encode_response_end_records(1))
     |> bytes_tree.to_bit_array
   let records = helpers.decode_all_records(bytes)
   let stdout_bytes = helpers.collect_stdout(records)
@@ -769,9 +769,9 @@ pub fn writes_bytes_response_with_cgi_header_block_test() {
     |> response.set_body(Nil)
   let bytes =
     bytes_tree.new()
-    |> bytes_tree.append_tree(handler.encode_response_header(1, resp))
+    |> bytes_tree.append_tree(handler.encode_response_headers(1, resp))
     |> bytes_tree.append_tree(handler.encode_stdout_chunk(1, body))
-    |> bytes_tree.append_tree(handler.encode_response_terminator(1))
+    |> bytes_tree.append_tree(handler.encode_response_end_records(1))
     |> bytes_tree.to_bit_array
 
   let records = helpers.decode_all_records(bytes)

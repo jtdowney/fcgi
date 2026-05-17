@@ -39,24 +39,32 @@ pub fn encode_incoming(record: protocol.Incoming) -> BitArray {
         False -> 0
       }
       let body = <<role:size(16), flags:size(8), 0:size(40)>>
-      protocol.frame_bits_unchecked(protocol.begin_request_type, id, body)
+      protocol.encode_record_bits_unchecked(
+        protocol.begin_request_type,
+        id,
+        body,
+      )
     }
     protocol.AbortRequest(id) ->
-      protocol.frame_bits_unchecked(protocol.abort_request_type, id, <<>>)
+      protocol.encode_record_bits_unchecked(
+        protocol.abort_request_type,
+        id,
+        <<>>,
+      )
     protocol.Params(id, data) ->
-      protocol.frame_bits_unchecked(protocol.params_type, id, data)
+      protocol.encode_record_bits_unchecked(protocol.params_type, id, data)
     protocol.Stdin(id, data) ->
-      protocol.frame_bits_unchecked(protocol.stdin_type, id, data)
+      protocol.encode_record_bits_unchecked(protocol.stdin_type, id, data)
     protocol.GetValues(names) -> {
       let pairs = list.map(names, fn(name) { #(name, "") })
-      protocol.frame_tree_unchecked(
+      protocol.encode_record_tree_unchecked(
         protocol.get_values_type,
         0,
         protocol.encode_name_value_pairs(pairs),
       )
     }
     protocol.IncomingUnknown(id, type_byte) ->
-      protocol.frame_bits_unchecked(type_byte, id, <<>>)
+      protocol.encode_record_bits_unchecked(type_byte, id, <<>>)
   }
 
   bytes_tree.to_bit_array(tree)

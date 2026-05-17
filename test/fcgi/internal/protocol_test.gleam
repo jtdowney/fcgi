@@ -372,10 +372,11 @@ pub fn parse_name_value_pairs_rejects_truncated_length_prefix_test() {
     == Error(protocol.MalformedNameValue)
 }
 
-pub fn frame_bits_at_max_content_size_succeeds_test() {
+pub fn record_bits_at_max_content_size_succeeds_test() {
   let body = <<0:size({ protocol.max_record_content_size * 8 })>>
-  let tree = protocol.frame_bits_unchecked(protocol.stdout_type, 1, body)
-  let framed = bytes_tree.to_bit_array(tree)
+  let tree =
+    protocol.encode_record_bits_unchecked(protocol.stdout_type, 1, body)
+  let encoded = bytes_tree.to_bit_array(tree)
   let assert <<
     1:size(8),
     record_type:size(8),
@@ -384,7 +385,7 @@ pub fn frame_bits_at_max_content_size_succeeds_test() {
     _padding:size(8),
     0:size(8),
     _rest:bits,
-  >> = framed
+  >> = encoded
   assert record_type == protocol.stdout_type
   assert content_length == protocol.max_record_content_size
 }

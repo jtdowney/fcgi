@@ -268,7 +268,7 @@ pub fn send_file(
 /// after sending the response headers; each call to `send_chunk(sender,
 /// data)` writes one or more `STDOUT` records to the upstream proxy.
 ///
-/// A panic raised by `producer` is caught; the response terminator is
+/// A panic raised by `producer` is caught; the response end records are
 /// still emitted so the upstream proxy sees a clean end-of-request.
 pub fn stream(producer: fn(StreamSender) -> Nil) -> ResponseData {
   Stream(producer:)
@@ -319,9 +319,6 @@ pub fn start(
   use socket <- result.try(listen_on_address(address))
   use bound_port <- result.try(resolve_bound_port(socket, address))
   let factory_name = process.new_name(prefix: "fcgi_server_factory")
-  let handler = fn(req: Request(Nil), ctx: Context, reader: BodyReader) {
-    builder.handler(request.set_body(req, reader), ctx)
-  }
 
   let supervisor =
     build_supervisor(
@@ -330,7 +327,7 @@ pub fn start(
       factory_name,
       builder.max_body_size,
       builder.body_read_timeout_ms,
-      handler,
+      builder.handler,
     )
 
   use started <- result.try(start_supervisor(supervisor, socket, address))
@@ -376,9 +373,6 @@ pub fn supervised(
     })
   })
 }
-
-type ServerHandler =
-  fn(Request(Nil), Context, BodyReader) -> Response(ResponseData)
 
 fn listen_on_address(address: Address) -> Result(Socket, StartError) {
   case address {
@@ -432,7 +426,7 @@ fn build_supervisor(
   ),
   max_body_size: Int,
   body_read_timeout_ms: Int,
-  handler: ServerHandler,
+  handler: Handler,
 ) -> static_supervisor.Builder {
   let supervisor = static_supervisor.new(static_supervisor.RestForOne)
   let supervisor = case address {
@@ -482,7 +476,7 @@ fn connection_factory_supervised(
 ) -> supervision.ChildSpecification(
   factory_supervisor.Supervisor(Worker, process.Subject(Nil)),
 ) {
-  factory_supervisor.worker_child(start_connection)
+  factory_supervisor.worker_child(start_connection_worker)
   |> factory_supervisor.named(name)
   |> factory_supervisor.supervised
   |> supervision.restart(supervision.Transient)
@@ -495,7 +489,7 @@ fn acceptor_supervised(
   ),
   max_body_size: Int,
   body_read_timeout_ms: Int,
-  handler: ServerHandler,
+  handler: Handler,
 ) -> supervision.ChildSpecification(Nil) {
   supervision.worker(fn() {
     let factory = factory_supervisor.get_by_name(factory_name)
@@ -566,7 +560,7 @@ fn accept_loop(
   factory: factory_supervisor.Supervisor(Worker, process.Subject(Nil)),
   max_body_size: Int,
   body_read_timeout_ms: Int,
-  handler: ServerHandler,
+  handler: Handler,
 ) -> Nil {
   case accept(listen_socket) {
     Error(reason) ->
@@ -589,7 +583,7 @@ fn accept_loop(
         }
       }
     Ok(client) -> {
-      handle_accepted_client(
+      start_accepted_connection(
         client,
         factory,
         max_body_size,
@@ -607,12 +601,12 @@ fn accept_loop(
   }
 }
 
-fn handle_accepted_client(
+fn start_accepted_connection(
   client: Socket,
   factory: factory_supervisor.Supervisor(Worker, process.Subject(Nil)),
   max_body_size: Int,
   body_read_timeout_ms: Int,
-  handler: ServerHandler,
+  handler: Handler,
 ) -> Nil {
   let worker =
     Worker(socket: client, max_body_size:, body_read_timeout_ms:, handler:)
@@ -629,7 +623,9 @@ fn handle_accepted_client(
   }
 }
 
-fn start_connection(worker: Worker) -> actor.StartResult(process.Subject(Nil)) {
+fn start_connection_worker(
+  worker: Worker,
+) -> actor.StartResult(process.Subject(Nil)) {
   let report_back = process.new_subject()
   let pid =
     process.spawn(fn() {
@@ -659,7 +655,7 @@ type Worker {
     socket: Socket,
     max_body_size: Int,
     body_read_timeout_ms: Int,
-    handler: ServerHandler,
+    handler: Handler,
   )
 }
 
@@ -674,9 +670,9 @@ type NextRequest {
   Closed
 }
 
-type RequestStep {
-  ResumeIdle
-  ResumeDrain(snapshot: BodySnapshot)
+type AfterResponse {
+  Continue
+  DrainBody(snapshot: BodySnapshot)
 }
 
 fn run_connection_loop(worker: Worker, state: handler.State) -> Nil {
@@ -687,7 +683,8 @@ fn run_connection_loop(worker: Worker, state: handler.State) -> Nil {
         process_request(worker, state, request_id, params, remaining_events)
       {
         Error(_) -> Nil
-        Ok(step) -> resume_connection(worker, state, keep_conn, step)
+        Ok(after_response) ->
+          resume_connection(worker, state, keep_conn, after_response)
       }
   }
 }
@@ -696,12 +693,12 @@ fn resume_connection(
   worker: Worker,
   state: handler.State,
   keep_conn: Bool,
-  step: RequestStep,
+  after_response: AfterResponse,
 ) -> Nil {
   use <- bool.guard(when: !keep_conn, return: Nil)
-  case step {
-    ResumeIdle -> run_connection_loop(worker, state)
-    ResumeDrain(snap) ->
+  case after_response {
+    Continue -> run_connection_loop(worker, state)
+    DrainBody(snap) ->
       case drain_body_loop(snap, worker) {
         Error(_) -> Nil
         Ok(next_state) -> run_connection_loop(worker, next_state)
@@ -757,18 +754,19 @@ fn process_request(
   request_id: Int,
   params: BitArray,
   events: List(handler.Event),
-) -> Result(RequestStep, Nil) {
+) -> Result(AfterResponse, Nil) {
   case parse_params(params) {
     Error(message) -> {
       logging.log(logging.Warning, "rejecting request: " <> message)
       let response = error_response(400, message)
       send_response(worker.socket, request_id, response)
-      |> result.replace(ResumeIdle)
+      |> result.replace(Continue)
     }
     Ok(#(req, cgi)) -> {
       let overflowed = list.contains(events, handler.BodyTooLarge)
       let #(reader, snapshots) = build_body_reader(worker, state, events)
-      let response = run_user_handler(worker.handler, req, cgi, reader)
+      let req = request.set_body(req, reader)
+      let response = run_user_handler(worker.handler, req, cgi)
 
       let latest =
         snapshots
@@ -795,8 +793,8 @@ fn process_request(
       })
 
       case latest {
-        Error(_) -> Ok(ResumeIdle)
-        Ok(snap) -> Ok(ResumeDrain(snap))
+        Error(_) -> Ok(Continue)
+        Ok(snap) -> Ok(DrainBody(snap))
       }
     }
   }
@@ -1020,12 +1018,11 @@ fn request_error_message(error: RequestError) -> String {
 }
 
 fn run_user_handler(
-  handler_fn: ServerHandler,
-  req: Request(Nil),
+  handler_fn: Handler,
+  req: Request(BodyReader),
   ctx: Context,
-  reader: BodyReader,
 ) -> Response(ResponseData) {
-  case exception.rescue(fn() { handler_fn(req, ctx, reader) }) {
+  case exception.rescue(fn() { handler_fn(req, ctx) }) {
     Ok(resp) -> resp
     Error(exception) -> {
       logging.log(
@@ -1049,17 +1046,17 @@ fn send_response(
   request_id: Int,
   response: Response(ResponseData),
 ) -> Result(Nil, Nil) {
-  let header = handler.encode_response_header(request_id, response)
-  let terminator = handler.encode_response_terminator(request_id)
+  let headers = handler.encode_response_headers(request_id, response)
+  let end_records = handler.encode_response_end_records(request_id)
   case response.body {
     Bytes(data) -> {
       let body = handler.encode_stdout_chunk(request_id, data)
-      let combined = bytes_tree.concat([header, body, terminator])
+      let combined = bytes_tree.concat([headers, body, end_records])
       send_if_nonempty(socket, combined)
     }
     File(handle, offset, length) -> {
       use <- exception.defer(fn() { close_file(handle) })
-      use _ <- result.try(send_tree(socket, header))
+      use _ <- result.try(send_tree(socket, headers))
       use _ <- result.try(send_via_sendfile(
         socket,
         request_id,
@@ -1068,10 +1065,10 @@ fn send_response(
         length,
       ))
 
-      send_tree(socket, terminator)
+      send_tree(socket, end_records)
     }
     Stream(producer) -> {
-      use _ <- result.try(send_tree(socket, header))
+      use _ <- result.try(send_tree(socket, headers))
 
       let sender = StreamSender(socket:, request_id:)
       case exception.rescue(fn() { producer(sender) }) {
@@ -1083,7 +1080,7 @@ fn send_response(
           )
       }
 
-      send_tree(socket, terminator)
+      send_tree(socket, end_records)
     }
   }
 }
@@ -1099,7 +1096,7 @@ fn send_via_sendfile(
 
   let chunk_size = int.min(remaining, protocol.max_record_content_size)
   let #(header, padding_length) =
-    protocol.encode_stdout_frame_header(request_id, chunk_size)
+    protocol.encode_stdout_record_header(request_id, chunk_size)
   use _ <- result.try(send_bits(socket, header))
   use _ <- result.try(drain_sendfile_loop(socket, handle, offset, chunk_size))
   use _ <- result.try(send_padding(socket, padding_length))
