@@ -1520,7 +1520,8 @@ pub fn negative_max_body_size_returns_error_test() {
 }
 
 pub fn listener_error_when_parent_directory_missing_test() {
-  let path = "/tmp/fcgi-nonexistent-parent-dir-test/socket.sock"
+  use parent <- helpers.with_temp_directory
+  let path = parent <> "/missing/socket.sock"
   let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
     response.new(200) |> response.set_body(fcgi.bytes(bytes_tree.new()))
   }

@@ -26,6 +26,11 @@ pub fn with_temp_file(fun: fn(String) -> a) -> a {
   value
 }
 
+pub fn with_temp_directory(fun: fn(String) -> a) -> a {
+  let assert Ok(value) = temporary.create(temporary.directory(), fun)
+  value
+}
+
 pub fn encode_incoming(record: protocol.Incoming) -> BitArray {
   let result = case record {
     protocol.BeginRequest(id, role, keep_conn) -> {
