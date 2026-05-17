@@ -1098,7 +1098,7 @@ fn send_via_sendfile(
   use <- bool.guard(when: remaining <= 0, return: Ok(Nil))
 
   let chunk_size = int.min(remaining, protocol.max_record_content_size)
-  let assert Ok(#(header, padding_length)) =
+  let #(header, padding_length) =
     protocol.encode_stdout_frame_header(request_id, chunk_size)
   use _ <- result.try(send_bits(socket, header))
   use _ <- result.try(drain_sendfile_loop(socket, handle, offset, chunk_size))

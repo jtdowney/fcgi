@@ -130,7 +130,7 @@ pub fn outgoing_fixed_size_records_round_trip_test() {
     qcheck.default_config() |> qcheck.with_test_count(100),
     outgoing_fixed_size_record_generator(),
   )
-  let assert Ok(tree) = protocol.encode_record(record)
+  let tree = protocol.encode_record(record)
   let bytes = bytes_tree.to_bit_array(tree)
   let #(parsed, rest) = helpers.parse_outgoing(bytes)
   assert parsed == record
@@ -212,7 +212,7 @@ pub fn outgoing_data_records_round_trip_test() {
     qcheck.default_config() |> qcheck.with_test_count(100),
     outgoing_data_record_generator(),
   )
-  let assert Ok(tree) = protocol.encode_record(record)
+  let tree = protocol.encode_record(record)
   let bytes = bytes_tree.to_bit_array(tree)
   let #(parsed, rest) = helpers.parse_outgoing(bytes)
   assert parsed == record
@@ -374,12 +374,7 @@ pub fn parse_name_value_pairs_rejects_truncated_length_prefix_test() {
 
 pub fn frame_bits_at_max_content_size_succeeds_test() {
   let body = <<0:size({ protocol.max_record_content_size * 8 })>>
-  let assert Ok(tree) =
-    protocol.encode_frame(
-      protocol.stdout_type,
-      1,
-      bytes_tree.from_bit_array(body),
-    )
+  let tree = protocol.frame_bits_unchecked(protocol.stdout_type, 1, body)
   let framed = bytes_tree.to_bit_array(tree)
   let assert <<
     1:size(8),
@@ -392,21 +387,4 @@ pub fn frame_bits_at_max_content_size_succeeds_test() {
   >> = framed
   assert record_type == protocol.stdout_type
   assert content_length == protocol.max_record_content_size
-}
-
-pub fn frame_bits_above_max_content_size_errors_test() {
-  let oversize = protocol.max_record_content_size + 1
-  let body = <<0:size({ oversize * 8 })>>
-  assert protocol.encode_frame(
-      protocol.stdout_type,
-      1,
-      bytes_tree.from_bit_array(body),
-    )
-    == Error(protocol.ContentLengthExceedsMax(oversize))
-}
-
-pub fn encode_stdout_frame_header_above_max_errors_test() {
-  let oversize = protocol.max_record_content_size + 1
-  assert protocol.encode_stdout_frame_header(1, oversize)
-    == Error(protocol.ContentLengthExceedsMax(oversize))
 }

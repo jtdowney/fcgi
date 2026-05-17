@@ -32,50 +32,33 @@ pub fn with_temp_directory(fun: fn(String) -> a) -> a {
 }
 
 pub fn encode_incoming(record: protocol.Incoming) -> BitArray {
-  let result = case record {
+  let tree = case record {
     protocol.BeginRequest(id, role, keep_conn) -> {
       let flags = case keep_conn {
         True -> 1
         False -> 0
       }
       let body = <<role:size(16), flags:size(8), 0:size(40)>>
-      protocol.encode_frame(
-        protocol.begin_request_type,
-        id,
-        bytes_tree.from_bit_array(body),
-      )
+      protocol.frame_bits_unchecked(protocol.begin_request_type, id, body)
     }
     protocol.AbortRequest(id) ->
-      protocol.encode_frame(
-        protocol.abort_request_type,
-        id,
-        bytes_tree.from_bit_array(<<>>),
-      )
+      protocol.frame_bits_unchecked(protocol.abort_request_type, id, <<>>)
     protocol.Params(id, data) ->
-      protocol.encode_frame(
-        protocol.params_type,
-        id,
-        bytes_tree.from_bit_array(data),
-      )
+      protocol.frame_bits_unchecked(protocol.params_type, id, data)
     protocol.Stdin(id, data) ->
-      protocol.encode_frame(
-        protocol.stdin_type,
-        id,
-        bytes_tree.from_bit_array(data),
-      )
+      protocol.frame_bits_unchecked(protocol.stdin_type, id, data)
     protocol.GetValues(names) -> {
       let pairs = list.map(names, fn(name) { #(name, "") })
-      protocol.encode_frame(
+      protocol.frame_tree_unchecked(
         protocol.get_values_type,
         0,
         protocol.encode_name_value_pairs(pairs),
       )
     }
     protocol.IncomingUnknown(id, type_byte) ->
-      protocol.encode_frame(type_byte, id, bytes_tree.from_bit_array(<<>>))
+      protocol.frame_bits_unchecked(type_byte, id, <<>>)
   }
 
-  let assert Ok(tree) = result
   bytes_tree.to_bit_array(tree)
 }
 
