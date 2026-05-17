@@ -1656,6 +1656,74 @@ pub fn keep_alive_drains_unread_body_before_next_request_test() {
   assert body_for_request_id(records2, 2) == "ignored"
 }
 
+pub fn keep_alive_drain_flushes_management_record_replies_test() {
+  use path <- helpers.with_temp_socket_path
+  let ignore_body_handler = fn(
+    _req: Request(fcgi.BodyReader),
+    _ctx: fcgi.Context,
+  ) {
+    response.new(200)
+    |> response.set_header("content-type", "text/plain")
+    |> response.set_body(fcgi.bytes(bytes_tree.from_string("ignored")))
+  }
+  let assert Ok(started) =
+    ignore_body_handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect_unix(path)
+
+  let request_id = 1
+  let begin =
+    helpers.encode_incoming(protocol.BeginRequest(
+      request_id:,
+      role: protocol.responder_role,
+      keep_conn: True,
+    ))
+  let params =
+    helpers.encode_incoming(protocol.Params(
+      request_id:,
+      data: protocol.encode_name_value_pairs([
+        #("REQUEST_METHOD", "POST"),
+        #("CONTENT_LENGTH", "5"),
+      ])
+        |> bytes_tree.to_bit_array,
+    ))
+  let params_end =
+    helpers.encode_incoming(protocol.Params(request_id:, data: <<>>))
+  let body_chunk =
+    helpers.encode_incoming(protocol.Stdin(request_id:, data: <<"hello":utf8>>))
+  let assert Ok(_) =
+    sockets.send_bits(socket, <<
+      begin:bits,
+      params:bits,
+      params_end:bits,
+      body_chunk:bits,
+    >>)
+  let assert Ok(_resp1) = test_client.recv_all(socket, 1000)
+
+  let get_values =
+    helpers.encode_incoming(protocol.GetValues(names: ["FCGI_MPXS_CONNS"]))
+  let stdin_end =
+    helpers.encode_incoming(protocol.Stdin(request_id:, data: <<>>))
+  let assert Ok(_) =
+    sockets.send_bits(socket, <<get_values:bits, stdin_end:bits>>)
+  let assert Ok(resp2) = test_client.recv_all(socket, 1000)
+  sockets.close_socket(socket)
+  helpers.stop_supervisor(started)
+
+  let records2 = helpers.decode_all_records(resp2)
+  let has_get_values_result =
+    list.any(records2, fn(record) {
+      case record {
+        protocol.GetValuesResult(_) -> True
+        _ -> False
+      }
+    })
+  assert has_get_values_result
+}
+
 pub fn keep_conn_false_closes_socket_after_response_test() {
   use path <- helpers.with_temp_socket_path
   let assert Ok(started) =

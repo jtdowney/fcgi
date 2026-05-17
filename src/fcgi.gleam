@@ -1315,7 +1315,8 @@ fn drain_body_loop(
   case worker_recv(worker) {
     Error(_) -> Error(Nil)
     Ok(more) -> {
-      let #(_data, next, _outgoing) = step_body(snap, more, worker)
+      let #(_data, next, outgoing) = step_body(snap, more, worker)
+      let _ = send_if_nonempty(worker.socket, outgoing)
       drain_body_loop(next, worker)
     }
   }
