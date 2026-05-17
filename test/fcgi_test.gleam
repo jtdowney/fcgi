@@ -73,11 +73,12 @@ fn echo_handler(
   _ctx: fcgi.Context,
 ) -> response.Response(fcgi.ResponseData) {
   let assert Ok(tree) = fcgi.read_all(req.body)
-  let bytes = bytes_tree.to_bit_array(tree)
-  let assert Ok(text) = bit_array.to_string(bytes)
+  let body =
+    bytes_tree.from_string("echo:")
+    |> bytes_tree.append_tree(tree)
   response.new(200)
   |> response.set_header("content-type", "text/plain")
-  |> response.set_body(fcgi.bytes(bytes_tree.from_string("echo:" <> text)))
+  |> response.set_body(fcgi.bytes(body))
 }
 
 fn body_too_large_413_handler(
@@ -180,6 +181,35 @@ fn run_handler_with_body(
   body_text
 }
 
+fn run_handler_with_body_bits(
+  build_body: fn() -> fcgi.ResponseData,
+  request_bytes: BitArray,
+) -> BitArray {
+  use path <- helpers.with_temp_socket_path
+  let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
+    response.new(200)
+    |> response.set_header("content-type", "application/octet-stream")
+    |> response.set_body(build_body())
+  }
+
+  let assert Ok(started) =
+    handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect_unix(path)
+  let assert Ok(_) = sockets.send_bits(socket, request_bytes)
+  let assert Ok(bytes) = test_client.recv_all(socket, 5000)
+  sockets.close_socket(socket)
+  helpers.stop_supervisor(started)
+
+  let records = helpers.decode_all_records(bytes)
+  let stdout_payload = helpers.collect_stdout(records)
+  let assert Ok(#(_headers, body)) = helpers.split_response_body(stdout_payload)
+  body
+}
+
 fn run_unreachable_handler(request_bytes: BitArray) -> String {
   use path <- helpers.with_temp_socket_path
   let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
@@ -209,24 +239,23 @@ fn run_unreachable_handler(request_bytes: BitArray) -> String {
 
 fn drain_chunks(
   body: fcgi.BodyReader,
-  signal: process.Subject(String),
-  acc: List(String),
-) -> List(String) {
+  signal: process.Subject(BitArray),
+  acc: List(BitArray),
+) -> List(BitArray) {
   drain_chunks_loop(body(), signal, acc)
 }
 
 fn drain_chunks_loop(
   result: Result(fcgi.Read, fcgi.ReadError),
-  signal: process.Subject(String),
-  acc: List(String),
-) -> List(String) {
+  signal: process.Subject(BitArray),
+  acc: List(BitArray),
+) -> List(BitArray) {
   case result {
     Error(_) -> acc
     Ok(fcgi.End) -> acc
     Ok(fcgi.Chunk(data, consume)) -> {
-      let assert Ok(text) = bit_array.to_string(data)
-      process.send(signal, text)
-      drain_chunks_loop(consume(), signal, [text, ..acc])
+      process.send(signal, data)
+      drain_chunks_loop(consume(), signal, [data, ..acc])
     }
   }
 }
@@ -418,18 +447,21 @@ pub fn end_to_end_send_file_streams_fixture_test() {
 
 pub fn end_to_end_send_file_streams_large_file_across_multiple_records_test() {
   use path <- helpers.with_temp_file
-  let payload = bit_array.concat(list.repeat(<<"abcdefgh":utf8>>, 20_000))
+  let payload =
+    bit_array.concat(list.repeat(
+      <<0, 255, 1, 128, 0xDE, 0xAD, 0xBE, 0xEF>>,
+      20_000,
+    ))
   let assert Ok(_) = simplifile.write_bits(to: path, bits: payload)
   let body =
-    run_handler_with_body(
+    run_handler_with_body_bits(
       fn() {
         let assert Ok(b) = fcgi.send_file(path:, offset: 0, limit: option.None)
         b
       },
       simple_get_request_bytes(),
     )
-  let assert Ok(payload_string) = bit_array.to_string(payload)
-  assert body == payload_string
+  assert body == payload
 }
 
 pub fn file_unlinked_after_send_file_still_streams_test() {
@@ -693,27 +725,20 @@ pub fn handler_panic_returns_500_response_test() {
 
 pub fn request_body_is_passed_through_to_handler_test() {
   use path <- helpers.with_temp_socket_path
+  let payload = <<0, 255, 1, 128>>
   let request_bytes =
     helpers.request_stream_bytes(
       request_id: 1,
       params: [#("REQUEST_METHOD", "POST")],
-      body: <<"hello":utf8>>,
+      body: payload,
       keep_conn: False,
     )
 
   let handler = fn(req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
     let assert Ok(buffered) = fcgi.read_all(req.body)
-    let assert Ok(text) =
-      buffered
-      |> bytes_tree.to_bit_array
-      |> bit_array.to_string
     response.new(200)
-    |> response.set_header("content-type", "text/plain")
-    |> response.set_body(
-      fcgi.bytes(bytes_tree.from_string(
-        int.to_string(bytes_tree.byte_size(buffered)) <> ":" <> text,
-      )),
-    )
+    |> response.set_header("content-type", "application/octet-stream")
+    |> response.set_body(fcgi.bytes(buffered))
   }
 
   let assert Ok(started) =
@@ -730,13 +755,14 @@ pub fn request_body_is_passed_through_to_handler_test() {
 
   let records = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
-  let assert Ok(text) = bit_array.to_string(stdout_payload)
-  let assert Ok(#(_headers, summary)) = string.split_once(text, "\r\n\r\n")
-  assert summary == "5:hello"
+  let assert Ok(#(_headers, body)) = helpers.split_response_body(stdout_payload)
+  assert body == payload
 }
 
 pub fn request_body_is_streamed_chunk_by_chunk_test() {
   use path <- helpers.with_temp_socket_path
+  let first_chunk = <<0, 255, 1>>
+  let second_chunk = <<128, 0, 200>>
   let begin =
     helpers.encode_incoming(protocol.BeginRequest(
       request_id: 1,
@@ -752,19 +778,21 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
   let params_end =
     helpers.encode_incoming(protocol.Params(request_id: 1, data: <<>>))
   let stdin_one =
-    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<"AAA":utf8>>))
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: first_chunk))
   let stdin_two =
-    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<"BBB":utf8>>))
+    helpers.encode_incoming(protocol.Stdin(request_id: 1, data: second_chunk))
   let stdin_end =
     helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<>>))
 
   let signal = process.new_subject()
   let handler = fn(req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
-    let lines = drain_chunks(req.body, signal, [])
-    let summary = string.join(list.reverse(lines), ",")
+    let chunks = drain_chunks(req.body, signal, [])
+    let body =
+      list.reverse(chunks)
+      |> list.fold(bytes_tree.new(), bytes_tree.append)
     response.new(200)
-    |> response.set_header("content-type", "text/plain")
-    |> response.set_body(fcgi.bytes(bytes_tree.from_string(summary)))
+    |> response.set_header("content-type", "application/octet-stream")
+    |> response.set_body(fcgi.bytes(body))
   }
 
   let assert Ok(started) =
@@ -781,9 +809,11 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
       params_end:bits,
       stdin_one:bits,
     >>)
-  let assert Ok("AAA") = process.receive(signal, 1000)
+  let assert Ok(observed_first) = process.receive(signal, 1000)
+  assert observed_first == first_chunk
   let assert Ok(_) = sockets.send_bits(socket, stdin_two)
-  let assert Ok("BBB") = process.receive(signal, 1000)
+  let assert Ok(observed_second) = process.receive(signal, 1000)
+  assert observed_second == second_chunk
   let assert Ok(_) = sockets.send_bits(socket, stdin_end)
   let assert Ok(bytes) = test_client.recv_all(socket, 1000)
   sockets.close_socket(socket)
@@ -791,9 +821,8 @@ pub fn request_body_is_streamed_chunk_by_chunk_test() {
 
   let records = helpers.decode_all_records(bytes)
   let stdout_payload = helpers.collect_stdout(records)
-  let assert Ok(text) = bit_array.to_string(stdout_payload)
-  let assert Ok(#(_headers, summary)) = string.split_once(text, "\r\n\r\n")
-  assert summary == "AAA,BBB"
+  let assert Ok(#(_headers, body)) = helpers.split_response_body(stdout_payload)
+  assert body == <<first_chunk:bits, second_chunk:bits>>
 }
 
 pub fn builder_body_read_timeout_surfaces_to_body_reader_test() {
@@ -1173,15 +1202,18 @@ pub fn abort_after_body_end_does_not_disrupt_handler_response_test() {
 
 pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
   use path <- helpers.with_temp_socket_path
+  let first_chunk = <<0, 255, 1>>
+  let second_chunk = <<128, 0, 200>>
+  let third_chunk = <<0xDE, 0xAD, 0xBE, 0xEF>>
   let handler = fn(_req: Request(fcgi.BodyReader), _ctx: fcgi.Context) {
     let producer = fn(sender) {
-      let _ = fcgi.send_chunk(sender, bytes_tree.from_string("first"))
-      let _ = fcgi.send_chunk(sender, bytes_tree.from_string("second"))
-      let _ = fcgi.send_chunk(sender, bytes_tree.from_string("third"))
+      let _ = fcgi.send_chunk(sender, bytes_tree.from_bit_array(first_chunk))
+      let _ = fcgi.send_chunk(sender, bytes_tree.from_bit_array(second_chunk))
+      let _ = fcgi.send_chunk(sender, bytes_tree.from_bit_array(third_chunk))
       Nil
     }
     response.new(200)
-    |> response.set_header("content-type", "text/plain")
+    |> response.set_header("content-type", "application/octet-stream")
     |> response.set_body(fcgi.stream(producer))
   }
 
@@ -1209,9 +1241,8 @@ pub fn stream_response_emits_each_chunk_as_separate_stdout_test() {
   assert list.length(stdout_payloads) == 5
 
   let stdout_payload = helpers.collect_stdout(records)
-  let assert Ok(text) = bit_array.to_string(stdout_payload)
-  let assert Ok(#(_headers, body_text)) = string.split_once(text, "\r\n\r\n")
-  assert body_text == "firstsecondthird"
+  let assert Ok(#(_headers, body)) = helpers.split_response_body(stdout_payload)
+  assert body == <<first_chunk:bits, second_chunk:bits, third_chunk:bits>>
 
   let end_record = list.last(records)
   assert end_record

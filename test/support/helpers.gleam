@@ -196,3 +196,31 @@ pub fn collect_stdout(records: List(protocol.Outgoing)) -> BitArray {
     }
   })
 }
+
+pub fn split_response_body(
+  bytes: BitArray,
+) -> Result(#(BitArray, BitArray), Nil) {
+  split_response_body_loop(bytes, 0)
+}
+
+fn split_response_body_loop(
+  bytes: BitArray,
+  offset: Int,
+) -> Result(#(BitArray, BitArray), Nil) {
+  let total = bit_array.byte_size(bytes)
+  case offset + 4 > total {
+    True -> Error(Nil)
+    False -> {
+      let assert Ok(window) = bit_array.slice(bytes, offset, 4)
+      case window == <<13, 10, 13, 10>> {
+        True -> {
+          let assert Ok(headers) = bit_array.slice(bytes, 0, offset)
+          let assert Ok(body) =
+            bit_array.slice(bytes, offset + 4, total - offset - 4)
+          Ok(#(headers, body))
+        }
+        False -> split_response_body_loop(bytes, offset + 1)
+      }
+    }
+  }
+}
