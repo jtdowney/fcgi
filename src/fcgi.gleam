@@ -773,12 +773,12 @@ fn serve_request(
     }
     Ok(#(req, cgi)) -> {
       let overflowed = list.contains(events, responder.BodyTooLarge)
-      let #(reader, snapshots) = build_body_reader(connection, state, events)
+      let #(reader, snapshot) = build_body_reader(connection, state, events)
       let req = request.set_body(req, reader)
       let response = run_user_handler(connection.handler, req, cgi)
 
       let latest =
-        snapshots
+        snapshot
         |> option.to_result(Nil)
         |> result.try(process.receive(_, 0))
       let aborted =
@@ -1142,7 +1142,7 @@ type BodyContext {
     finished: Bool,
     overflowed: Bool,
     connection: Connection,
-    snapshots: process.Subject(BodySnapshot),
+    snapshot: process.Subject(BodySnapshot),
   )
 }
 
@@ -1155,6 +1155,14 @@ type BodySnapshot {
   )
 }
 
+fn replace_snapshot(
+  mailbox: process.Subject(BodySnapshot),
+  snap: BodySnapshot,
+) -> Nil {
+  let _ = process.receive(mailbox, 0)
+  process.send(mailbox, snap)
+}
+
 fn build_body_reader(
   connection: Connection,
   state: responder.State,
@@ -1164,9 +1172,9 @@ fn build_body_reader(
   case ended || overflowed {
     True -> #(buffered_reader(data, overflowed), option.None)
     False -> {
-      let subject = process.new_subject()
+      let snapshot = process.new_subject()
       process.send(
-        subject,
+        snapshot,
         BodySnapshot(state:, finished: False, overflowed: False, aborted: False),
       )
       let ctx =
@@ -1176,9 +1184,9 @@ fn build_body_reader(
           finished: False,
           overflowed: False,
           connection:,
-          snapshots: subject,
+          snapshot:,
         )
-      #(fn() { next_read(ctx) }, option.Some(subject))
+      #(fn() { next_read(ctx) }, option.Some(snapshot))
     }
   }
 }
@@ -1246,8 +1254,7 @@ fn pull_more(ctx: BodyContext) -> Result(Read, ReadError) {
 
   use more <- result.try(recv_connection(ctx.connection))
   let #(new_data, next) = step_body(prior, more, ctx.connection)
-  let _ = process.receive(ctx.snapshots, 0)
-  process.send(ctx.snapshots, next)
+  replace_snapshot(ctx.snapshot, next)
 
   use <- bool.guard(when: next.aborted, return: Error(RequestAborted))
   next_read(
