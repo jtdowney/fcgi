@@ -421,9 +421,7 @@ fn resolve_bound_port(
 fn build_supervisor(
   address: Address,
   socket: Socket,
-  factory_name: process.Name(
-    factory_supervisor.Message(Connection, process.Subject(Nil)),
-  ),
+  factory_name: ConnectionFactoryName,
   max_body_size: Int,
   body_read_timeout_ms: Int,
   handler: Handler,
@@ -472,12 +470,8 @@ fn start_path_janitor(path: String) -> actor.StartResult(Nil) {
 }
 
 fn connection_factory_supervised(
-  name: process.Name(
-    factory_supervisor.Message(Connection, process.Subject(Nil)),
-  ),
-) -> supervision.ChildSpecification(
-  factory_supervisor.Supervisor(Connection, process.Subject(Nil)),
-) {
+  name: ConnectionFactoryName,
+) -> supervision.ChildSpecification(ConnectionFactory) {
   factory_supervisor.worker_child(start_connection_process)
   |> factory_supervisor.named(name)
   |> factory_supervisor.supervised
@@ -486,9 +480,7 @@ fn connection_factory_supervised(
 
 fn acceptor_supervised(
   socket: Socket,
-  factory_name: process.Name(
-    factory_supervisor.Message(Connection, process.Subject(Nil)),
-  ),
+  factory_name: ConnectionFactoryName,
   max_body_size: Int,
   body_read_timeout_ms: Int,
   handler: Handler,
@@ -559,7 +551,7 @@ fn describe_transport_error(error: SocketError) -> String {
 
 fn accept_loop(
   listen_socket: Socket,
-  factory: factory_supervisor.Supervisor(Connection, process.Subject(Nil)),
+  factory: ConnectionFactory,
   max_body_size: Int,
   body_read_timeout_ms: Int,
   handler: Handler,
@@ -605,7 +597,7 @@ fn accept_loop(
 
 fn start_connection(
   client_socket: Socket,
-  factory: factory_supervisor.Supervisor(Connection, process.Subject(Nil)),
+  factory: ConnectionFactory,
   max_body_size: Int,
   body_read_timeout_ms: Int,
   handler: Handler,
@@ -665,6 +657,12 @@ type Connection {
     handler: Handler,
   )
 }
+
+type ConnectionFactory =
+  factory_supervisor.Supervisor(Connection, process.Subject(Nil))
+
+type ConnectionFactoryName =
+  process.Name(factory_supervisor.Message(Connection, process.Subject(Nil)))
 
 type NextRequest {
   Ready(
@@ -868,21 +866,11 @@ pub fn to_http_request(
         extra: dict.new(),
       ),
     )
-  fold_pairs_loop(pairs, initial, body)
-}
-
-fn fold_pairs_loop(
-  pairs: List(#(String, String)),
-  acc: PartialRequest,
-  body: body,
-) -> Result(#(Request(body), Context), RequestError) {
-  case pairs {
-    [] -> finalize_request(acc, body)
-    [#(key, value), ..rest] -> {
-      let next = apply_pair(acc, key, value)
-      fold_pairs_loop(rest, next, body)
-    }
-  }
+  list.fold(pairs, initial, fn(acc, pair) {
+    let #(key, value) = pair
+    apply_pair(acc, key, value)
+  })
+  |> finalize_request(body)
 }
 
 fn apply_pair(
