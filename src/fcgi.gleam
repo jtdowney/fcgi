@@ -681,11 +681,11 @@ type AfterResponse {
 }
 
 fn run_connection_loop(connection: Connection, state: responder.State) -> Nil {
-  case next_request(connection, state, <<>>) {
+  case await_request(connection, state, <<>>) {
     Closed -> Nil
     Ready(state:, request_id:, params:, remaining_events:, keep_conn:) ->
       case
-        process_request(connection, state, request_id, params, remaining_events)
+        serve_request(connection, state, request_id, params, remaining_events)
       {
         Error(_) -> Nil
         Ok(after_response) ->
@@ -714,7 +714,7 @@ fn step_and_flush(
   outcome
 }
 
-fn next_request(
+fn await_request(
   connection: Connection,
   state: responder.State,
   pending: BitArray,
@@ -753,11 +753,11 @@ fn wait_for_bytes(
   case recv(connection.socket, 0, connection.body_read_timeout_ms) {
     Error(_) -> Closed
     Ok(<<>>) -> Closed
-    Ok(more) -> next_request(connection, state, more)
+    Ok(more) -> await_request(connection, state, more)
   }
 }
 
-fn process_request(
+fn serve_request(
   connection: Connection,
   state: responder.State,
   request_id: Int,
