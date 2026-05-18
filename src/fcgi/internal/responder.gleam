@@ -172,14 +172,15 @@ fn handle_record(
       Action(state:, outgoing: reply, events: [], decision: KeepParsing)
     }
 
-    _, _ ->
-      Action(
-        state:,
-        outgoing: bytes_tree.new(),
-        events: [],
-        decision: KeepParsing,
-      )
+    _, protocol.Params(_, _) -> skip_record(state)
+    _, protocol.Stdin(_, _) -> skip_record(state)
+    _, protocol.AbortRequest(_) -> skip_record(state)
+    _, protocol.IncomingUnknown(_, _) -> skip_record(state)
   }
+}
+
+fn skip_record(state: State) -> Action {
+  Action(state:, outgoing: bytes_tree.new(), events: [], decision: KeepParsing)
 }
 
 fn handle_begin_request_idle(
