@@ -1620,6 +1620,66 @@ pub fn keep_alive_handles_pipelined_requests_in_one_send_test() {
   assert body_for_request_id(records, 2) == "echo:beta"
 }
 
+pub fn keep_alive_processes_pipelined_begin_request_after_predecessor_test() {
+  use path <- helpers.with_temp_socket_path
+  let assert Ok(started) =
+    echo_handler
+    |> fcgi.new
+    |> fcgi.listen_unix(path)
+    |> fcgi.start
+
+  let assert Ok(socket) = test_client.connect_unix(path)
+
+  let begin_b =
+    helpers.encode_incoming(protocol.BeginRequest(
+      request_id: 2,
+      role: protocol.responder_role,
+      keep_conn: False,
+    ))
+  let assert Ok(_) =
+    sockets.send_bits(socket, <<
+      echo_post_request_bytes(1, "alpha", True):bits,
+      begin_b:bits,
+    >>)
+  let assert Ok(resp1) = test_client.recv_all(socket, 1000)
+
+  let request_id = 2
+  let params_b =
+    helpers.encode_incoming(protocol.Params(
+      request_id:,
+      data: protocol.encode_name_value_pairs([
+        #("REQUEST_METHOD", "POST"),
+        #("CONTENT_LENGTH", "4"),
+        #("CONTENT_TYPE", "text/plain"),
+      ])
+        |> bytes_tree.to_bit_array,
+    ))
+  let params_end =
+    helpers.encode_incoming(protocol.Params(request_id:, data: <<>>))
+  let stdin_data =
+    helpers.encode_incoming(protocol.Stdin(request_id:, data: <<"beta":utf8>>))
+  let stdin_end =
+    helpers.encode_incoming(protocol.Stdin(request_id:, data: <<>>))
+  let assert Ok(_) =
+    sockets.send_bits(socket, <<
+      params_b:bits,
+      params_end:bits,
+      stdin_data:bits,
+      stdin_end:bits,
+    >>)
+  let assert Ok(resp2) = test_client.recv_all(socket, 1000)
+  sockets.close_socket(socket)
+  helpers.stop_supervisor(started)
+
+  let records1 = helpers.decode_all_records(resp1)
+  assert end_request_for(records1, 1)
+  assert body_for_request_id(records1, 1) == "echo:alpha"
+
+  let records2 = helpers.decode_all_records(resp2)
+  assert end_request_for(records2, 2)
+  assert body_for_request_id(records2, 2) == "echo:beta"
+}
+
 pub fn keep_alive_drains_unread_body_before_next_request_test() {
   use path <- helpers.with_temp_socket_path
   let ignore_body_handler = fn(
