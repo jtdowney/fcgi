@@ -703,6 +703,17 @@ fn run_connection_loop(connection: Connection, state: responder.State) -> Nil {
   }
 }
 
+fn step_and_flush(
+  connection: Connection,
+  state: responder.State,
+  bytes: BitArray,
+) -> responder.Outcome {
+  let outcome =
+    responder.step(state, bytes:, max_body_size: connection.max_body_size)
+  let _ = send_if_nonempty(connection.socket, outcome.outgoing)
+  outcome
+}
+
 fn next_request(
   connection: Connection,
   state: responder.State,
@@ -717,13 +728,7 @@ fn next_request(
       && bit_array.byte_size(buffered) == 0,
     return: fn() { wait_for_bytes(connection, state) },
   )
-  let outcome =
-    responder.step(
-      state,
-      bytes: pending,
-      max_body_size: connection.max_body_size,
-    )
-  let _ = send_if_nonempty(connection.socket, outcome.outgoing)
+  let outcome = step_and_flush(connection, state, pending)
   case outcome.events {
     [responder.RequestReady(request_id, params, keep_conn), ..rest] ->
       Ready(
@@ -1239,7 +1244,8 @@ fn pull_more(ctx: BodyContext) -> Result(Read, ReadError) {
       aborted: False,
     )
 
-  use #(new_data, next) <- result.try(recv_and_step(prior, ctx.connection))
+  use more <- result.try(recv_connection(ctx.connection))
+  let #(new_data, next) = step_body(prior, more, ctx.connection)
   let _ = process.receive(ctx.snapshots, 0)
   process.send(ctx.snapshots, next)
 
@@ -1259,9 +1265,8 @@ fn step_body(
   prior: BodySnapshot,
   bytes: BitArray,
   connection: Connection,
-) -> #(BitArray, BodySnapshot, BytesTree) {
-  let outcome =
-    responder.step(prior.state, bytes:, max_body_size: connection.max_body_size)
+) -> #(BitArray, BodySnapshot) {
+  let outcome = step_and_flush(connection, prior.state, bytes)
   let #(data, ended, overflowed) = collect_body_events(outcome.events)
   let aborted = case outcome.continuation {
     responder.CloseConnection -> True
@@ -1275,17 +1280,7 @@ fn step_body(
       overflowed: prior.overflowed || overflowed,
       aborted: prior.aborted || aborted,
     )
-  #(data, snapshot, outcome.outgoing)
-}
-
-fn recv_and_step(
-  prior: BodySnapshot,
-  connection: Connection,
-) -> Result(#(BitArray, BodySnapshot), ReadError) {
-  use more <- result.try(recv_connection(connection))
-  let #(data, snapshot, outgoing) = step_body(prior, more, connection)
-  let _ = send_if_nonempty(connection.socket, outgoing)
-  Ok(#(data, snapshot))
+  #(data, snapshot)
 }
 
 fn recv_connection(connection: Connection) -> Result(BitArray, ReadError) {
@@ -1311,8 +1306,7 @@ fn drain_body_loop(
   case recv_connection(connection) {
     Error(_) -> Error(Nil)
     Ok(more) -> {
-      let #(_data, next, outgoing) = step_body(snap, more, connection)
-      let _ = send_if_nonempty(connection.socket, outgoing)
+      let #(_data, next) = step_body(snap, more, connection)
       drain_body_loop(next, connection)
     }
   }
