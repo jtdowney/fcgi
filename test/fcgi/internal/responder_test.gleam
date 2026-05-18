@@ -1,6 +1,6 @@
 import birdie
-import fcgi/internal/handler
 import fcgi/internal/protocol
+import fcgi/internal/responder
 import gleam/bit_array
 import gleam/bytes_tree
 import gleam/http/response
@@ -15,9 +15,9 @@ fn response_payload_string(
 ) -> String {
   let bytes =
     bytes_tree.new()
-    |> bytes_tree.append_tree(handler.encode_response_headers(1, resp))
-    |> bytes_tree.append_tree(handler.encode_stdout_chunk(1, body_bytes))
-    |> bytes_tree.append_tree(handler.encode_response_end_records(1))
+    |> bytes_tree.append_tree(responder.encode_response_headers(1, resp))
+    |> bytes_tree.append_tree(responder.encode_stdout_chunk(1, body_bytes))
+    |> bytes_tree.append_tree(responder.encode_response_end_records(1))
     |> bytes_tree.to_bit_array
   let records = helpers.decode_all_records(bytes)
   let stdout_bytes = helpers.collect_stdout(records)
@@ -35,17 +35,17 @@ pub fn assembles_simple_request_test() {
     )
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
-  assert outcome.continuation == handler.WaitForMore
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
+  assert outcome.continuation == responder.WaitForMore
   assert outcome.events
     == [
-      handler.Start(
+      responder.RequestReady(
         request_id: 1,
         params: protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
           |> bytes_tree.to_bit_array,
         keep_conn: False,
       ),
-      handler.BodyEnd,
+      responder.BodyEnd,
     ]
 }
 
@@ -57,8 +57,8 @@ pub fn waits_for_more_when_only_begin_received_test() {
       keep_conn: True,
     ))
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes: begin, max_body_size: max_body)
-  assert outcome.continuation == handler.WaitForMore
+    responder.step(responder.Idle(<<>>), bytes: begin, max_body_size: max_body)
+  assert outcome.continuation == responder.WaitForMore
   assert outcome.events == []
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
@@ -96,14 +96,14 @@ pub fn body_too_large_after_start_emits_event_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: small_max)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: small_max)
 
   let assert [
-    handler.Start(_, _, _),
-    handler.BodyChunk(_),
-    handler.BodyTooLarge,
+    responder.RequestReady(_, _, _),
+    responder.BodyChunk(_),
+    responder.BodyTooLarge,
   ] = outcome.events
-  assert outcome.continuation == handler.WaitForMore
+  assert outcome.continuation == responder.WaitForMore
 }
 
 pub fn body_too_large_before_start_emits_overloaded_test() {
@@ -121,7 +121,7 @@ pub fn body_too_large_before_start_emits_overloaded_test() {
   let bytes = <<begin:bits, chunk:bits>>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: small_max)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: small_max)
 
   let #(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
@@ -133,7 +133,7 @@ pub fn body_too_large_before_start_emits_overloaded_test() {
     )
   assert rest == <<>>
   assert outcome.events == []
-  assert outcome.continuation == handler.CloseConnection
+  assert outcome.continuation == responder.CloseConnection
 }
 
 pub fn params_overflow_emits_overloaded_test() {
@@ -166,7 +166,7 @@ pub fn params_overflow_emits_overloaded_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   let #(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
@@ -177,7 +177,7 @@ pub fn params_overflow_emits_overloaded_test() {
       protocol_status: protocol.Overloaded,
     )
   assert rest == <<>>
-  assert outcome.continuation == handler.CloseConnection
+  assert outcome.continuation == responder.CloseConnection
   assert outcome.events == []
 }
 
@@ -190,9 +190,9 @@ pub fn begin_request_with_id_zero_closes_connection_test() {
     ))
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  assert outcome.continuation == handler.CloseConnection
+  assert outcome.continuation == responder.CloseConnection
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
 
@@ -211,10 +211,10 @@ pub fn unknown_application_record_is_ignored_test() {
   let bytes = <<begin:bits, unknown_app:bits>>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   assert bytes_tree.byte_size(outcome.outgoing) == 0
-  assert outcome.continuation == handler.WaitForMore
+  assert outcome.continuation == responder.WaitForMore
 }
 
 pub fn multiplexing_rejected_with_cant_mpx_conn_test() {
@@ -233,7 +233,7 @@ pub fn multiplexing_rejected_with_cant_mpx_conn_test() {
   let bytes = <<begin_one:bits, begin_two:bits>>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   let #(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
@@ -244,8 +244,8 @@ pub fn multiplexing_rejected_with_cant_mpx_conn_test() {
       protocol_status: protocol.CantMultiplexConnection,
     )
   assert rest == <<>>
-  assert outcome.continuation == handler.WaitForMore
-  let assert handler.Receiving(recv) = outcome.state
+  assert outcome.continuation == responder.WaitForMore
+  let assert responder.Receiving(recv) = outcome.state
   assert recv.request_id == 1
 }
 
@@ -264,13 +264,13 @@ pub fn unknown_record_type_replies_with_unknown_type_test() {
   let bytes = <<begin:bits, unknown:bits>>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   let #(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
   assert record == protocol.UnknownType(type_byte: 99)
   assert rest == <<>>
-  assert outcome.continuation == handler.WaitForMore
+  assert outcome.continuation == responder.WaitForMore
 }
 
 pub fn get_values_returns_capabilities_test() {
@@ -278,7 +278,7 @@ pub fn get_values_returns_capabilities_test() {
   let bytes = helpers.encode_incoming(protocol.GetValues(names:))
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   let #(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
@@ -288,7 +288,7 @@ pub fn get_values_returns_capabilities_test() {
   assert list.key_find(pairs, "FCGI_MAX_REQS") == Error(Nil)
   assert list.key_find(pairs, "FCGI_MPXS_CONNS") == Ok("0")
   assert list.length(pairs) == 1
-  assert outcome.continuation == handler.WaitForMore
+  assert outcome.continuation == responder.WaitForMore
 }
 
 pub fn abort_request_emits_request_complete_test() {
@@ -302,7 +302,7 @@ pub fn abort_request_emits_request_complete_test() {
   let bytes = <<begin:bits, abort:bits>>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   let #(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
@@ -313,8 +313,8 @@ pub fn abort_request_emits_request_complete_test() {
       protocol_status: protocol.RequestComplete,
     )
   assert rest == <<>>
-  assert outcome.continuation == handler.CloseConnection
-  assert outcome.state == handler.Idle(<<>>)
+  assert outcome.continuation == responder.CloseConnection
+  assert outcome.state == responder.Idle(<<>>)
   assert outcome.events == []
 }
 
@@ -326,7 +326,7 @@ pub fn non_responder_role_replies_unknown_role_test() {
       keep_conn: True,
     ))
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes: begin, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes: begin, max_body_size: max_body)
 
   let #(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
@@ -337,8 +337,8 @@ pub fn non_responder_role_replies_unknown_role_test() {
       protocol_status: protocol.UnknownRole,
     )
   assert rest == <<>>
-  assert outcome.continuation == handler.CloseConnection
-  assert outcome.state == handler.Idle(<<>>)
+  assert outcome.continuation == responder.CloseConnection
+  assert outcome.state == responder.Idle(<<>>)
 }
 
 pub fn split_params_records_concatenate_test() {
@@ -373,11 +373,11 @@ pub fn split_params_records_concatenate_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   assert outcome.events
     == [
-      handler.Start(
+      responder.RequestReady(
         request_id: 1,
         params: protocol.encode_name_value_pairs([
           #("REQUEST_METHOD", "POST"),
@@ -386,7 +386,7 @@ pub fn split_params_records_concatenate_test() {
           |> bytes_tree.to_bit_array,
         keep_conn: False,
       ),
-      handler.BodyEnd,
+      responder.BodyEnd,
     ]
 }
 
@@ -421,13 +421,13 @@ pub fn split_stdin_records_emit_separate_chunks_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   let assert [
-    handler.Start(_, _, _),
-    handler.BodyChunk(<<"hel":utf8>>),
-    handler.BodyChunk(<<"lo":utf8>>),
-    handler.BodyEnd,
+    responder.RequestReady(_, _, _),
+    responder.BodyChunk(<<"hel":utf8>>),
+    responder.BodyChunk(<<"lo":utf8>>),
+    responder.BodyEnd,
   ] = outcome.events
 }
 
@@ -459,9 +459,10 @@ pub fn stdin_before_params_is_dropped_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  let assert [handler.Start(_, _, _), handler.BodyEnd] = outcome.events
+  let assert [responder.RequestReady(_, _, _), responder.BodyEnd] =
+    outcome.events
 }
 
 pub fn terminators_arriving_in_separate_feeds_test() {
@@ -483,18 +484,23 @@ pub fn terminators_arriving_in_separate_feeds_test() {
     helpers.encode_incoming(protocol.Stdin(request_id: 1, data: <<>>))
 
   let outcome_one =
-    handler.step(
-      handler.Idle(<<>>),
+    responder.step(
+      responder.Idle(<<>>),
       bytes: <<begin:bits, real_params:bits>>,
       max_body_size: max_body,
     )
-  assert outcome_one.continuation == handler.WaitForMore
+  assert outcome_one.continuation == responder.WaitForMore
   assert outcome_one.events == []
 
   let outcome_two =
-    handler.step(outcome_one.state, bytes: params_end, max_body_size: max_body)
-  assert outcome_two.continuation == handler.WaitForMore
-  let assert [handler.Start(1, params_buffer, False)] = outcome_two.events
+    responder.step(
+      outcome_one.state,
+      bytes: params_end,
+      max_body_size: max_body,
+    )
+  assert outcome_two.continuation == responder.WaitForMore
+  let assert [responder.RequestReady(1, params_buffer, False)] =
+    outcome_two.events
   assert params_buffer
     == {
       protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
@@ -502,8 +508,8 @@ pub fn terminators_arriving_in_separate_feeds_test() {
     }
 
   let outcome_three =
-    handler.step(outcome_two.state, bytes: stdin_end, max_body_size: max_body)
-  assert outcome_three.events == [handler.BodyEnd]
+    responder.step(outcome_two.state, bytes: stdin_end, max_body_size: max_body)
+  assert outcome_three.events == [responder.BodyEnd]
 }
 
 pub fn get_values_filters_unknown_names_test() {
@@ -511,7 +517,7 @@ pub fn get_values_filters_unknown_names_test() {
   let bytes = helpers.encode_incoming(protocol.GetValues(names:))
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   let #(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
@@ -530,9 +536,9 @@ pub fn unsupported_version_closes_connection_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  assert outcome.continuation == handler.CloseConnection
+  assert outcome.continuation == responder.CloseConnection
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
 
@@ -548,9 +554,9 @@ pub fn malformed_begin_request_closes_connection_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  assert outcome.continuation == handler.CloseConnection
+  assert outcome.continuation == responder.CloseConnection
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
 
@@ -586,10 +592,12 @@ pub fn mismatched_params_id_is_ignored_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  let assert [handler.Start(1, params_buffer, False), handler.BodyEnd] =
-    outcome.events
+  let assert [
+    responder.RequestReady(1, params_buffer, False),
+    responder.BodyEnd,
+  ] = outcome.events
   assert params_buffer
     == {
       protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
@@ -633,12 +641,12 @@ pub fn mismatched_stdin_id_is_ignored_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   let assert [
-    handler.Start(1, _, False),
-    handler.BodyChunk(<<"hello":utf8>>),
-    handler.BodyEnd,
+    responder.RequestReady(1, _, False),
+    responder.BodyChunk(<<"hello":utf8>>),
+    responder.BodyEnd,
   ] = outcome.events
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
@@ -671,9 +679,10 @@ pub fn mismatched_abort_id_is_ignored_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  let assert [handler.Start(1, _, False), handler.BodyEnd] = outcome.events
+  let assert [responder.RequestReady(1, _, False), responder.BodyEnd] =
+    outcome.events
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
 
@@ -690,10 +699,12 @@ pub fn get_values_followed_by_request_drains_buffered_records_test() {
   let bytes = <<get_values:bits, request_bytes:bits>>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  let assert [handler.Start(7, params_buffer, False), handler.BodyEnd] =
-    outcome.events
+  let assert [
+    responder.RequestReady(7, params_buffer, False),
+    responder.BodyEnd,
+  ] = outcome.events
   assert params_buffer
     == {
       protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
@@ -723,9 +734,10 @@ pub fn unknown_type_followed_by_request_drains_buffered_records_test() {
   let bytes = <<unknown:bits, request_bytes:bits>>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  let assert [handler.Start(1, _, False), handler.BodyEnd] = outcome.events
+  let assert [responder.RequestReady(1, _, False), responder.BodyEnd] =
+    outcome.events
 
   let #(record, rest) =
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
@@ -747,13 +759,15 @@ pub fn feed_resumes_across_partial_records_test() {
   let assert Ok(second) = bit_array.slice(bytes, split_at, total - split_at)
 
   let outcome_one =
-    handler.step(handler.Idle(<<>>), bytes: first, max_body_size: max_body)
-  assert outcome_one.continuation == handler.WaitForMore
+    responder.step(responder.Idle(<<>>), bytes: first, max_body_size: max_body)
+  assert outcome_one.continuation == responder.WaitForMore
 
   let outcome_two =
-    handler.step(outcome_one.state, bytes: second, max_body_size: max_body)
-  let assert [handler.Start(1, params_buffer, False), handler.BodyEnd] =
-    outcome_two.events
+    responder.step(outcome_one.state, bytes: second, max_body_size: max_body)
+  let assert [
+    responder.RequestReady(1, params_buffer, False),
+    responder.BodyEnd,
+  ] = outcome_two.events
   assert params_buffer
     == {
       protocol.encode_name_value_pairs([#("REQUEST_METHOD", "GET")])
@@ -769,9 +783,9 @@ pub fn writes_bytes_response_with_cgi_header_block_test() {
     |> response.set_body(Nil)
   let bytes =
     bytes_tree.new()
-    |> bytes_tree.append_tree(handler.encode_response_headers(1, resp))
-    |> bytes_tree.append_tree(handler.encode_stdout_chunk(1, body))
-    |> bytes_tree.append_tree(handler.encode_response_end_records(1))
+    |> bytes_tree.append_tree(responder.encode_response_headers(1, resp))
+    |> bytes_tree.append_tree(responder.encode_stdout_chunk(1, body))
+    |> bytes_tree.append_tree(responder.encode_response_end_records(1))
     |> bytes_tree.to_bit_array
 
   let records = helpers.decode_all_records(bytes)
@@ -830,12 +844,12 @@ pub fn duplicate_params_terminator_does_not_emit_second_start_test() {
   let bytes = <<begin:bits, real_params:bits, params_end:bits, params_end:bits>>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   let start_count =
     list.count(outcome.events, fn(event) {
       case event {
-        handler.Start(_, _, _) -> True
+        responder.RequestReady(_, _, _) -> True
         _ -> False
       }
     })
@@ -870,8 +884,8 @@ pub fn non_empty_params_after_terminator_is_ignored_test() {
   >>
 
   let outcome =
-    handler.step(handler.Idle(<<>>), bytes:, max_body_size: max_body)
+    responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  let assert [handler.Start(_, params, _)] = outcome.events
+  let assert [responder.RequestReady(_, params, _)] = outcome.events
   assert params == initial_params
 }

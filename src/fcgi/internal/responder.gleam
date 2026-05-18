@@ -14,7 +14,7 @@ pub type Continuation {
 }
 
 pub type Event {
-  Start(request_id: Int, params: BitArray, keep_conn: Bool)
+  RequestReady(request_id: Int, params: BitArray, keep_conn: Bool)
   BodyChunk(data: BitArray)
   BodyEnd
   BodyTooLarge
@@ -40,7 +40,7 @@ pub type ReceivingState {
     request_id: Int,
     keep_conn: Bool,
     params: BitArray,
-    started: Bool,
+    request_ready_sent: Bool,
     stdin_received: Int,
     stdin_done: Bool,
     body_overflowed: Bool,
@@ -155,7 +155,7 @@ fn handle_record(
     Receiving(recv), protocol.BeginRequest(id, _, _) ->
       handle_begin_request_busy(recv, id)
     Receiving(recv), protocol.Params(id, data)
-      if id == recv.request_id && !recv.started
+      if id == recv.request_id && !recv.request_ready_sent
     -> handle_params(recv, data)
     Receiving(recv), protocol.Stdin(id, data) if id == recv.request_id ->
       handle_stdin(recv, data, max_body_size)
@@ -192,7 +192,7 @@ fn handle_begin_request_idle(
           request_id: id,
           keep_conn: keep,
           params: <<>>,
-          started: False,
+          request_ready_sent: False,
           stdin_received: 0,
           stdin_done: False,
           body_overflowed: False,
@@ -280,13 +280,13 @@ fn finish_params(recv: ReceivingState) -> Action {
         events: [],
         terminate: option.Some(CloseConnection),
       )
-    False -> emit_start(recv)
+    False -> emit_request_ready(recv)
   }
 }
 
-fn emit_start(recv: ReceivingState) -> Action {
-  let start_event =
-    Start(
+fn emit_request_ready(recv: ReceivingState) -> Action {
+  let ready_event =
+    RequestReady(
       request_id: recv.request_id,
       params: recv.params,
       keep_conn: recv.keep_conn,
@@ -296,14 +296,14 @@ fn emit_start(recv: ReceivingState) -> Action {
       Action(
         state: Idle(recv.buffer),
         outgoing: bytes_tree.new(),
-        events: [start_event, BodyEnd],
+        events: [ready_event, BodyEnd],
         terminate: option.None,
       )
     False ->
       Action(
-        state: Receiving(ReceivingState(..recv, started: True)),
+        state: Receiving(ReceivingState(..recv, request_ready_sent: True)),
         outgoing: bytes_tree.new(),
-        events: [start_event],
+        events: [ready_event],
         terminate: option.None,
       )
   }
@@ -321,7 +321,7 @@ fn handle_stdin(
 }
 
 fn finish_stdin(recv: ReceivingState) -> Action {
-  case recv.started {
+  case recv.request_ready_sent {
     True ->
       Action(
         state: Idle(recv.buffer),
@@ -366,7 +366,7 @@ fn handle_stdin_in_bounds(
   new_total: Int,
 ) -> Action {
   let updated = Receiving(ReceivingState(..recv, stdin_received: new_total))
-  case recv.started {
+  case recv.request_ready_sent {
     True ->
       Action(
         state: updated,
@@ -385,7 +385,7 @@ fn handle_stdin_in_bounds(
 }
 
 fn handle_stdin_overflow(recv: ReceivingState) -> Action {
-  case recv.started {
+  case recv.request_ready_sent {
     True ->
       Action(
         state: Receiving(ReceivingState(..recv, body_overflowed: True)),

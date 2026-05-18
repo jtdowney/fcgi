@@ -1,8 +1,8 @@
 //// FastCGI Responder server.
 
 import exception
-import fcgi/internal/handler
 import fcgi/internal/protocol
+import fcgi/internal/responder
 import gleam/bit_array
 import gleam/bool
 import gleam/bytes_tree.{type BytesTree}
@@ -281,7 +281,7 @@ pub fn stream(producer: fn(StreamSender) -> Nil) -> ResponseData {
 /// disconnected).
 pub fn send_chunk(sender: StreamSender, data: BytesTree) -> Result(Nil, Nil) {
   let StreamSender(socket:, request_id:) = sender
-  send_if_nonempty(socket, handler.encode_stdout_chunk(request_id, data))
+  send_if_nonempty(socket, responder.encode_stdout_chunk(request_id, data))
 }
 
 /// Why the listener could not start.
@@ -422,7 +422,7 @@ fn build_supervisor(
   address: Address,
   socket: Socket,
   factory_name: process.Name(
-    factory_supervisor.Message(Worker, process.Subject(Nil)),
+    factory_supervisor.Message(Connection, process.Subject(Nil)),
   ),
   max_body_size: Int,
   body_read_timeout_ms: Int,
@@ -472,11 +472,13 @@ fn start_path_janitor(path: String) -> actor.StartResult(Nil) {
 }
 
 fn connection_factory_supervised(
-  name: process.Name(factory_supervisor.Message(Worker, process.Subject(Nil))),
+  name: process.Name(
+    factory_supervisor.Message(Connection, process.Subject(Nil)),
+  ),
 ) -> supervision.ChildSpecification(
-  factory_supervisor.Supervisor(Worker, process.Subject(Nil)),
+  factory_supervisor.Supervisor(Connection, process.Subject(Nil)),
 ) {
-  factory_supervisor.worker_child(start_connection_worker)
+  factory_supervisor.worker_child(start_connection_process)
   |> factory_supervisor.named(name)
   |> factory_supervisor.supervised
   |> supervision.restart(supervision.Transient)
@@ -485,7 +487,7 @@ fn connection_factory_supervised(
 fn acceptor_supervised(
   socket: Socket,
   factory_name: process.Name(
-    factory_supervisor.Message(Worker, process.Subject(Nil)),
+    factory_supervisor.Message(Connection, process.Subject(Nil)),
   ),
   max_body_size: Int,
   body_read_timeout_ms: Int,
@@ -557,7 +559,7 @@ fn describe_transport_error(error: SocketError) -> String {
 
 fn accept_loop(
   listen_socket: Socket,
-  factory: factory_supervisor.Supervisor(Worker, process.Subject(Nil)),
+  factory: factory_supervisor.Supervisor(Connection, process.Subject(Nil)),
   max_body_size: Int,
   body_read_timeout_ms: Int,
   handler: Handler,
@@ -582,9 +584,9 @@ fn accept_loop(
           )
         }
       }
-    Ok(client) -> {
-      start_accepted_connection(
-        client,
+    Ok(client_socket) -> {
+      start_connection(
+        client_socket,
         factory,
         max_body_size,
         body_read_timeout_ms,
@@ -601,21 +603,26 @@ fn accept_loop(
   }
 }
 
-fn start_accepted_connection(
-  client: Socket,
-  factory: factory_supervisor.Supervisor(Worker, process.Subject(Nil)),
+fn start_connection(
+  client_socket: Socket,
+  factory: factory_supervisor.Supervisor(Connection, process.Subject(Nil)),
   max_body_size: Int,
   body_read_timeout_ms: Int,
   handler: Handler,
 ) -> Nil {
-  let worker =
-    Worker(socket: client, max_body_size:, body_read_timeout_ms:, handler:)
-  case factory_supervisor.start_child(factory, worker) {
-    Error(_) -> close_socket(client)
+  let connection =
+    Connection(
+      socket: client_socket,
+      max_body_size:,
+      body_read_timeout_ms:,
+      handler:,
+    )
+  case factory_supervisor.start_child(factory, connection) {
+    Error(_) -> close_socket(client_socket)
     Ok(started) ->
-      case controlling_process(client, started.pid) {
+      case controlling_process(client_socket, started.pid) {
         Error(_) -> {
-          close_socket(client)
+          close_socket(client_socket)
           process.send_exit(started.pid)
         }
         Ok(Nil) -> process.send(started.data, Nil)
@@ -623,8 +630,8 @@ fn start_accepted_connection(
   }
 }
 
-fn start_connection_worker(
-  worker: Worker,
+fn start_connection_process(
+  connection: Connection,
 ) -> actor.StartResult(process.Subject(Nil)) {
   let report_back = process.new_subject()
   let pid =
@@ -634,10 +641,10 @@ fn start_connection_worker(
 
       case process.receive(go, socket_owner_transfer_timeout_ms) {
         Ok(Nil) -> {
-          run_connection_loop(worker, handler.Idle(<<>>))
-          close_socket(worker.socket)
+          run_connection_loop(connection, responder.Idle(<<>>))
+          close_socket(connection.socket)
         }
-        Error(Nil) -> close_socket(worker.socket)
+        Error(Nil) -> close_socket(connection.socket)
       }
     })
 
@@ -645,13 +652,13 @@ fn start_connection_worker(
     Ok(go) -> Ok(actor.Started(pid:, data: go))
     Error(Nil) -> {
       process.send_exit(pid)
-      Error(actor.InitFailed("connection worker did not report back"))
+      Error(actor.InitFailed("connection process did not report back"))
     }
   }
 }
 
-type Worker {
-  Worker(
+type Connection {
+  Connection(
     socket: Socket,
     max_body_size: Int,
     body_read_timeout_ms: Int,
@@ -661,10 +668,10 @@ type Worker {
 
 type NextRequest {
   Ready(
-    state: handler.State,
+    state: responder.State,
     request_id: Int,
     params: BitArray,
-    remaining_events: List(handler.Event),
+    remaining_events: List(responder.Event),
     keep_conn: Bool,
   )
   Closed
@@ -675,56 +682,52 @@ type AfterResponse {
   DrainBody(snapshot: BodySnapshot)
 }
 
-fn run_connection_loop(worker: Worker, state: handler.State) -> Nil {
-  case next_request(worker, state, <<>>) {
+fn run_connection_loop(connection: Connection, state: responder.State) -> Nil {
+  case next_request(connection, state, <<>>) {
     Closed -> Nil
     Ready(state:, request_id:, params:, remaining_events:, keep_conn:) ->
       case
-        process_request(worker, state, request_id, params, remaining_events)
+        process_request(connection, state, request_id, params, remaining_events)
       {
         Error(_) -> Nil
         Ok(after_response) ->
-          resume_connection(worker, state, keep_conn, after_response)
-      }
-  }
-}
-
-fn resume_connection(
-  worker: Worker,
-  state: handler.State,
-  keep_conn: Bool,
-  after_response: AfterResponse,
-) -> Nil {
-  use <- bool.guard(when: !keep_conn, return: Nil)
-  case after_response {
-    Continue -> run_connection_loop(worker, state)
-    DrainBody(snap) ->
-      case drain_body_loop(snap, worker) {
-        Error(_) -> Nil
-        Ok(next_state) -> run_connection_loop(worker, next_state)
+          case keep_conn, after_response {
+            False, Continue -> Nil
+            False, DrainBody(_) -> Nil
+            True, Continue -> run_connection_loop(connection, state)
+            True, DrainBody(snap) ->
+              case drain_body_loop(snap, connection) {
+                Error(_) -> Nil
+                Ok(next_state) -> run_connection_loop(connection, next_state)
+              }
+          }
       }
   }
 }
 
 fn next_request(
-  worker: Worker,
-  state: handler.State,
+  connection: Connection,
+  state: responder.State,
   pending: BitArray,
 ) -> NextRequest {
   let buffered = case state {
-    handler.Idle(buf) -> buf
-    handler.Receiving(recv) -> recv.buffer
+    responder.Idle(buf) -> buf
+    responder.Receiving(recv) -> recv.buffer
   }
   use <- bool.lazy_guard(
     when: bit_array.byte_size(pending) == 0
       && bit_array.byte_size(buffered) == 0,
-    return: fn() { wait_for_bytes(worker, state) },
+    return: fn() { wait_for_bytes(connection, state) },
   )
   let outcome =
-    handler.step(state, bytes: pending, max_body_size: worker.max_body_size)
-  let _ = send_if_nonempty(worker.socket, outcome.outgoing)
+    responder.step(
+      state,
+      bytes: pending,
+      max_body_size: connection.max_body_size,
+    )
+  let _ = send_if_nonempty(connection.socket, outcome.outgoing)
   case outcome.events {
-    [handler.Start(request_id, params, keep_conn), ..rest] ->
+    [responder.RequestReady(request_id, params, keep_conn), ..rest] ->
       Ready(
         state: outcome.state,
         request_id:,
@@ -734,39 +737,42 @@ fn next_request(
       )
     _ ->
       case outcome.continuation {
-        handler.CloseConnection -> Closed
-        handler.WaitForMore -> wait_for_bytes(worker, outcome.state)
+        responder.CloseConnection -> Closed
+        responder.WaitForMore -> wait_for_bytes(connection, outcome.state)
       }
   }
 }
 
-fn wait_for_bytes(worker: Worker, state: handler.State) -> NextRequest {
-  case recv(worker.socket, 0, worker.body_read_timeout_ms) {
+fn wait_for_bytes(
+  connection: Connection,
+  state: responder.State,
+) -> NextRequest {
+  case recv(connection.socket, 0, connection.body_read_timeout_ms) {
     Error(_) -> Closed
     Ok(<<>>) -> Closed
-    Ok(more) -> next_request(worker, state, more)
+    Ok(more) -> next_request(connection, state, more)
   }
 }
 
 fn process_request(
-  worker: Worker,
-  state: handler.State,
+  connection: Connection,
+  state: responder.State,
   request_id: Int,
   params: BitArray,
-  events: List(handler.Event),
+  events: List(responder.Event),
 ) -> Result(AfterResponse, Nil) {
   case parse_params(params) {
     Error(message) -> {
       logging.log(logging.Warning, "rejecting request: " <> message)
       let response = error_response(400, message)
-      send_response(worker.socket, request_id, response)
+      send_response(connection.socket, request_id, response)
       |> result.replace(Continue)
     }
     Ok(#(req, cgi)) -> {
-      let overflowed = list.contains(events, handler.BodyTooLarge)
-      let #(reader, snapshots) = build_body_reader(worker, state, events)
+      let overflowed = list.contains(events, responder.BodyTooLarge)
+      let #(reader, snapshots) = build_body_reader(connection, state, events)
       let req = request.set_body(req, reader)
-      let response = run_user_handler(worker.handler, req, cgi)
+      let response = run_user_handler(connection.handler, req, cgi)
 
       let latest =
         snapshots
@@ -781,12 +787,12 @@ fn process_request(
         dispose_response(response)
         Error(Nil)
       })
-      use _ <- result.try(send_response(worker.socket, request_id, response))
+      use _ <- result.try(send_response(connection.socket, request_id, response))
       use <- bool.lazy_guard(when: overflowed, return: fn() {
         logging.log(
           logging.Warning,
           "closing connection: body exceeded max_body_size of "
-            <> int.to_string(worker.max_body_size)
+            <> int.to_string(connection.max_body_size)
             <> " bytes",
         )
         Error(Nil)
@@ -1046,11 +1052,11 @@ fn send_response(
   request_id: Int,
   response: Response(ResponseData),
 ) -> Result(Nil, Nil) {
-  let headers = handler.encode_response_headers(request_id, response)
-  let end_records = handler.encode_response_end_records(request_id)
+  let headers = responder.encode_response_headers(request_id, response)
+  let end_records = responder.encode_response_end_records(request_id)
   case response.body {
     Bytes(data) -> {
-      let body = handler.encode_stdout_chunk(request_id, data)
+      let body = responder.encode_stdout_chunk(request_id, data)
       let combined = bytes_tree.concat([headers, body, end_records])
       send_if_nonempty(socket, combined)
     }
@@ -1138,18 +1144,18 @@ fn send_if_nonempty(socket: Socket, bytes: BytesTree) -> Result(Nil, Nil) {
 
 type BodyContext {
   BodyContext(
-    state: handler.State,
+    state: responder.State,
     pending: BitArray,
     finished: Bool,
     overflowed: Bool,
-    worker: Worker,
+    connection: Connection,
     snapshots: process.Subject(BodySnapshot),
   )
 }
 
 type BodySnapshot {
   BodySnapshot(
-    state: handler.State,
+    state: responder.State,
     finished: Bool,
     overflowed: Bool,
     aborted: Bool,
@@ -1157,9 +1163,9 @@ type BodySnapshot {
 }
 
 fn build_body_reader(
-  worker: Worker,
-  state: handler.State,
-  events: List(handler.Event),
+  connection: Connection,
+  state: responder.State,
+  events: List(responder.Event),
 ) -> #(BodyReader, Option(process.Subject(BodySnapshot))) {
   let #(data, ended, overflowed) = collect_body_events(events)
   case ended || overflowed {
@@ -1176,7 +1182,7 @@ fn build_body_reader(
           pending: data,
           finished: False,
           overflowed: False,
-          worker:,
+          connection:,
           snapshots: subject,
         )
       #(fn() { next_read(ctx) }, option.Some(subject))
@@ -1184,30 +1190,32 @@ fn build_body_reader(
   }
 }
 
-fn collect_body_events(events: List(handler.Event)) -> #(BitArray, Bool, Bool) {
+fn collect_body_events(
+  events: List(responder.Event),
+) -> #(BitArray, Bool, Bool) {
   collect_body_events_loop(events, <<>>, False, False)
 }
 
 fn collect_body_events_loop(
-  events: List(handler.Event),
+  events: List(responder.Event),
   data: BitArray,
   ended: Bool,
   overflowed: Bool,
 ) -> #(BitArray, Bool, Bool) {
   case events {
     [] -> #(data, ended, overflowed)
-    [handler.BodyChunk(chunk), ..rest] ->
+    [responder.BodyChunk(chunk), ..rest] ->
       collect_body_events_loop(
         rest,
         <<data:bits, chunk:bits>>,
         ended,
         overflowed,
       )
-    [handler.BodyEnd, ..rest] ->
+    [responder.BodyEnd, ..rest] ->
       collect_body_events_loop(rest, data, True, overflowed)
-    [handler.BodyTooLarge, ..rest] ->
+    [responder.BodyTooLarge, ..rest] ->
       collect_body_events_loop(rest, data, True, True)
-    [handler.Start(_, _, _), ..rest] ->
+    [responder.RequestReady(_, _, _), ..rest] ->
       collect_body_events_loop(rest, data, ended, overflowed)
   }
 }
@@ -1243,7 +1251,7 @@ fn pull_more(ctx: BodyContext) -> Result(Read, ReadError) {
       aborted: False,
     )
 
-  use #(new_data, next) <- result.try(recv_and_step(prior, ctx.worker))
+  use #(new_data, next) <- result.try(recv_and_step(prior, ctx.connection))
   let _ = process.receive(ctx.snapshots, 0)
   process.send(ctx.snapshots, next)
 
@@ -1262,14 +1270,14 @@ fn pull_more(ctx: BodyContext) -> Result(Read, ReadError) {
 fn step_body(
   prior: BodySnapshot,
   bytes: BitArray,
-  worker: Worker,
+  connection: Connection,
 ) -> #(BitArray, BodySnapshot, BytesTree) {
   let outcome =
-    handler.step(prior.state, bytes:, max_body_size: worker.max_body_size)
+    responder.step(prior.state, bytes:, max_body_size: connection.max_body_size)
   let #(data, ended, overflowed) = collect_body_events(outcome.events)
   let aborted = case outcome.continuation {
-    handler.CloseConnection -> True
-    handler.WaitForMore -> False
+    responder.CloseConnection -> True
+    responder.WaitForMore -> False
   }
 
   let snapshot =
@@ -1284,16 +1292,16 @@ fn step_body(
 
 fn recv_and_step(
   prior: BodySnapshot,
-  worker: Worker,
+  connection: Connection,
 ) -> Result(#(BitArray, BodySnapshot), ReadError) {
-  use more <- result.try(worker_recv(worker))
-  let #(data, snapshot, outgoing) = step_body(prior, more, worker)
-  let _ = send_if_nonempty(worker.socket, outgoing)
+  use more <- result.try(recv_connection(connection))
+  let #(data, snapshot, outgoing) = step_body(prior, more, connection)
+  let _ = send_if_nonempty(connection.socket, outgoing)
   Ok(#(data, snapshot))
 }
 
-fn worker_recv(worker: Worker) -> Result(BitArray, ReadError) {
-  case recv(worker.socket, 0, worker.body_read_timeout_ms) {
+fn recv_connection(connection: Connection) -> Result(BitArray, ReadError) {
+  case recv(connection.socket, 0, connection.body_read_timeout_ms) {
     Error(Posix(reason)) ->
       case atom.to_string(reason) {
         "timeout" -> Error(ReadTimeout)
@@ -1307,17 +1315,17 @@ fn worker_recv(worker: Worker) -> Result(BitArray, ReadError) {
 
 fn drain_body_loop(
   snap: BodySnapshot,
-  worker: Worker,
-) -> Result(handler.State, Nil) {
+  connection: Connection,
+) -> Result(responder.State, Nil) {
   use <- bool.guard(when: snap.overflowed || snap.aborted, return: Error(Nil))
   use <- bool.guard(when: snap.finished, return: Ok(snap.state))
 
-  case worker_recv(worker) {
+  case recv_connection(connection) {
     Error(_) -> Error(Nil)
     Ok(more) -> {
-      let #(_data, next, outgoing) = step_body(snap, more, worker)
-      let _ = send_if_nonempty(worker.socket, outgoing)
-      drain_body_loop(next, worker)
+      let #(_data, next, outgoing) = step_body(snap, more, connection)
+      let _ = send_if_nonempty(connection.socket, outgoing)
+      drain_body_loop(next, connection)
     }
   }
 }
