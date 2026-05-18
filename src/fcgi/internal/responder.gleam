@@ -5,7 +5,6 @@ import gleam/bytes_tree.{type BytesTree}
 import gleam/http/response.{type Response}
 import gleam/int
 import gleam/list
-import gleam/option
 import gleam/string
 
 pub type Continuation {
@@ -48,12 +47,17 @@ pub type ReceivingState {
   )
 }
 
+type Decision {
+  KeepParsing
+  Halt(continuation: Continuation)
+}
+
 type Action {
   Action(
     state: State,
     outgoing: BytesTree,
     events: List(Event),
-    terminate: option.Option(Continuation),
+    decision: Decision,
   )
 }
 
@@ -106,22 +110,22 @@ fn step_loop(
       let combined_outgoing = bytes_tree.append_tree(outgoing, action.outgoing)
       let combined_events =
         list.fold(action.events, events_rev, fn(acc, evt) { [evt, ..acc] })
-      case action.terminate, is_request_boundary(state, action.state) {
-        option.Some(continuation), _ ->
+      case action.decision, is_request_boundary(state, action.state) {
+        Halt(continuation), _ ->
           Outcome(
             state: advanced,
             outgoing: combined_outgoing,
             events: list.reverse(combined_events),
             continuation:,
           )
-        option.None, True ->
+        KeepParsing, True ->
           Outcome(
             state: advanced,
             outgoing: combined_outgoing,
             events: list.reverse(combined_events),
             continuation: WaitForMore,
           )
-        option.None, False ->
+        KeepParsing, False ->
           step_loop(advanced, combined_outgoing, combined_events, max_body_size)
       }
     }
@@ -146,7 +150,7 @@ fn handle_record(
         state:,
         outgoing: bytes_tree.new(),
         events: [],
-        terminate: option.Some(CloseConnection),
+        decision: Halt(CloseConnection),
       )
 
     Idle(buffer), protocol.BeginRequest(id, role, keep) ->
@@ -165,7 +169,7 @@ fn handle_record(
     _, protocol.GetValues(names) -> handle_get_values(state, names)
     _, protocol.IncomingUnknown(0, type_byte) -> {
       let reply = protocol.encode_record(protocol.UnknownType(type_byte:))
-      Action(state:, outgoing: reply, events: [], terminate: option.None)
+      Action(state:, outgoing: reply, events: [], decision: KeepParsing)
     }
 
     _, _ ->
@@ -173,7 +177,7 @@ fn handle_record(
         state:,
         outgoing: bytes_tree.new(),
         events: [],
-        terminate: option.None,
+        decision: KeepParsing,
       )
   }
 }
@@ -200,7 +204,7 @@ fn handle_begin_request_idle(
         )),
         outgoing: bytes_tree.new(),
         events: [],
-        terminate: option.None,
+        decision: KeepParsing,
       )
     False -> {
       let reply =
@@ -213,7 +217,7 @@ fn handle_begin_request_idle(
         state: Idle(buffer),
         outgoing: reply,
         events: [],
-        terminate: option.Some(CloseConnection),
+        decision: Halt(CloseConnection),
       )
     }
   }
@@ -230,7 +234,7 @@ fn handle_begin_request_busy(recv: ReceivingState, id: Int) -> Action {
     state: Receiving(recv),
     outgoing: reply,
     events: [],
-    terminate: option.None,
+    decision: KeepParsing,
   )
 }
 
@@ -251,7 +255,7 @@ fn handle_params(recv: ReceivingState, data: BitArray) -> Action {
         ),
         outgoing: bytes_tree.new(),
         events: [],
-        terminate: option.None,
+        decision: KeepParsing,
       )
     }
   }
@@ -278,7 +282,7 @@ fn finish_params(recv: ReceivingState) -> Action {
         state: Idle(<<>>),
         outgoing: encode_overloaded_end(recv.request_id),
         events: [],
-        terminate: option.Some(CloseConnection),
+        decision: Halt(CloseConnection),
       )
     False -> emit_request_ready(recv)
   }
@@ -297,14 +301,14 @@ fn emit_request_ready(recv: ReceivingState) -> Action {
         state: Idle(recv.buffer),
         outgoing: bytes_tree.new(),
         events: [ready_event, BodyEnd],
-        terminate: option.None,
+        decision: KeepParsing,
       )
     False ->
       Action(
         state: Receiving(ReceivingState(..recv, request_ready_sent: True)),
         outgoing: bytes_tree.new(),
         events: [ready_event],
-        terminate: option.None,
+        decision: KeepParsing,
       )
   }
 }
@@ -327,14 +331,14 @@ fn finish_stdin(recv: ReceivingState) -> Action {
         state: Idle(recv.buffer),
         outgoing: bytes_tree.new(),
         events: [BodyEnd],
-        terminate: option.None,
+        decision: KeepParsing,
       )
     False ->
       Action(
         state: Receiving(ReceivingState(..recv, stdin_done: True)),
         outgoing: bytes_tree.new(),
         events: [],
-        terminate: option.None,
+        decision: KeepParsing,
       )
   }
 }
@@ -350,7 +354,7 @@ fn handle_stdin_chunk(
       state: Receiving(recv),
       outgoing: bytes_tree.new(),
       events: [],
-      terminate: option.None,
+      decision: KeepParsing,
     ),
   )
   let new_total = recv.stdin_received + bit_array.byte_size(data)
@@ -372,14 +376,14 @@ fn handle_stdin_in_bounds(
         state: updated,
         outgoing: bytes_tree.new(),
         events: [BodyChunk(data)],
-        terminate: option.None,
+        decision: KeepParsing,
       )
     False ->
       Action(
         state: updated,
         outgoing: bytes_tree.new(),
         events: [],
-        terminate: option.None,
+        decision: KeepParsing,
       )
   }
 }
@@ -391,14 +395,14 @@ fn handle_stdin_overflow(recv: ReceivingState) -> Action {
         state: Receiving(ReceivingState(..recv, body_overflowed: True)),
         outgoing: bytes_tree.new(),
         events: [BodyTooLarge],
-        terminate: option.None,
+        decision: KeepParsing,
       )
     False ->
       Action(
         state: Idle(recv.buffer),
         outgoing: encode_overloaded_end(recv.request_id),
         events: [],
-        terminate: option.Some(CloseConnection),
+        decision: Halt(CloseConnection),
       )
   }
 }
@@ -414,14 +418,14 @@ fn handle_abort(request_id: Int) -> Action {
     state: Idle(<<>>),
     outgoing: reply,
     events: [],
-    terminate: option.Some(CloseConnection),
+    decision: Halt(CloseConnection),
   )
 }
 
 fn handle_get_values(state: State, names: List(String)) -> Action {
   let pairs = list.filter_map(names, lookup_capability)
   let reply = protocol.encode_record(protocol.GetValuesResult(pairs:))
-  Action(state:, outgoing: reply, events: [], terminate: option.None)
+  Action(state:, outgoing: reply, events: [], decision: KeepParsing)
 }
 
 /// Informational values reported in response to FCGI_GET_VALUES. Only
