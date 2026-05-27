@@ -7,7 +7,7 @@ import gleam/int
 import gleam/list
 import gleam/string
 
-pub type Continuation {
+pub type Next {
   WaitForMore
   CloseConnection
 }
@@ -20,12 +20,7 @@ pub type Event {
 }
 
 pub type Outcome {
-  Outcome(
-    state: State,
-    outgoing: BytesTree,
-    events: List(Event),
-    continuation: Continuation,
-  )
+  Outcome(state: State, outgoing: BytesTree, events: List(Event), next: Next)
 }
 
 pub type State {
@@ -49,11 +44,11 @@ pub type ReceivingState {
 
 type Decision {
   KeepParsing
-  Halt(continuation: Continuation)
+  Halt(next: Next)
 }
 
-type Action {
-  Action(
+type Transition {
+  Transition(
     state: State,
     outgoing: BytesTree,
     events: List(Event),
@@ -73,6 +68,7 @@ pub fn step(
         ReceivingState(..recv, buffer: <<recv.buffer:bits, bytes:bits>>),
       )
   }
+
   step_loop(combined, bytes_tree.new(), [], max_body_size)
 }
 
@@ -86,20 +82,21 @@ fn step_loop(
     Idle(buf) -> buf
     Receiving(recv) -> recv.buffer
   }
+
   case protocol.parse_record(buffer) {
     protocol.NeedMore ->
       Outcome(
         state:,
         outgoing:,
         events: list.reverse(events_rev),
-        continuation: WaitForMore,
+        next: WaitForMore,
       )
     protocol.ParseError(_) ->
       Outcome(
         state:,
         outgoing:,
         events: list.reverse(events_rev),
-        continuation: CloseConnection,
+        next: CloseConnection,
       )
     protocol.Parsed(record, rest) -> {
       let action = handle_record(state, record, max_body_size)
@@ -110,20 +107,21 @@ fn step_loop(
       let combined_outgoing = bytes_tree.append_tree(outgoing, action.outgoing)
       let combined_events =
         list.fold(action.events, events_rev, fn(acc, evt) { [evt, ..acc] })
+
       case action.decision, is_request_boundary(state, action.state) {
-        Halt(continuation), _ ->
+        Halt(next), _ ->
           Outcome(
             state: advanced,
             outgoing: combined_outgoing,
             events: list.reverse(combined_events),
-            continuation:,
+            next:,
           )
         KeepParsing, True ->
           Outcome(
             state: advanced,
             outgoing: combined_outgoing,
             events: list.reverse(combined_events),
-            continuation: WaitForMore,
+            next: WaitForMore,
           )
         KeepParsing, False ->
           step_loop(advanced, combined_outgoing, combined_events, max_body_size)
@@ -143,10 +141,10 @@ fn handle_record(
   state: State,
   record: protocol.Incoming,
   max_body_size: Int,
-) -> Action {
+) -> Transition {
   case state, record {
     _, protocol.BeginRequest(0, _, _) ->
-      Action(
+      Transition(
         state:,
         outgoing: bytes_tree.new(),
         events: [],
@@ -169,7 +167,7 @@ fn handle_record(
     _, protocol.GetValues(names) -> handle_get_values(state, names)
     _, protocol.IncomingUnknown(0, type_byte) -> {
       let reply = protocol.encode_record(protocol.UnknownType(type_byte:))
-      Action(state:, outgoing: reply, events: [], decision: KeepParsing)
+      Transition(state:, outgoing: reply, events: [], decision: KeepParsing)
     }
 
     _, protocol.Params(_, _) -> skip_record(state)
@@ -179,8 +177,13 @@ fn handle_record(
   }
 }
 
-fn skip_record(state: State) -> Action {
-  Action(state:, outgoing: bytes_tree.new(), events: [], decision: KeepParsing)
+fn skip_record(state: State) -> Transition {
+  Transition(
+    state:,
+    outgoing: bytes_tree.new(),
+    events: [],
+    decision: KeepParsing,
+  )
 }
 
 fn handle_begin_request_idle(
@@ -188,10 +191,10 @@ fn handle_begin_request_idle(
   id: Int,
   role: Int,
   keep: Bool,
-) -> Action {
+) -> Transition {
   case role == protocol.responder_role {
     True ->
-      Action(
+      Transition(
         state: Receiving(ReceivingState(
           buffer:,
           request_id: id,
@@ -214,7 +217,8 @@ fn handle_begin_request_idle(
           app_status: 0,
           protocol_status: protocol.UnknownRole,
         ))
-      Action(
+
+      Transition(
         state: Idle(buffer),
         outgoing: reply,
         events: [],
@@ -224,14 +228,15 @@ fn handle_begin_request_idle(
   }
 }
 
-fn handle_begin_request_busy(recv: ReceivingState, id: Int) -> Action {
+fn handle_begin_request_busy(recv: ReceivingState, id: Int) -> Transition {
   let reply =
     protocol.encode_record(protocol.EndRequest(
       request_id: id,
       app_status: 0,
       protocol_status: protocol.CantMultiplexConnection,
     ))
-  Action(
+
+  Transition(
     state: Receiving(recv),
     outgoing: reply,
     events: [],
@@ -239,7 +244,7 @@ fn handle_begin_request_busy(recv: ReceivingState, id: Int) -> Action {
   )
 }
 
-fn handle_params(recv: ReceivingState, data: BitArray) -> Action {
+fn handle_params(recv: ReceivingState, data: BitArray) -> Transition {
   case bit_array.byte_size(data) {
     0 -> finish_params(recv)
     _ -> {
@@ -250,7 +255,8 @@ fn handle_params(recv: ReceivingState, data: BitArray) -> Action {
           data,
           protocol.max_record_content_size,
         )
-      Action(
+
+      Transition(
         state: Receiving(
           ReceivingState(..recv, params:, params_overflowed: overflow),
         ),
@@ -276,10 +282,10 @@ fn merge_input(
   }
 }
 
-fn finish_params(recv: ReceivingState) -> Action {
+fn finish_params(recv: ReceivingState) -> Transition {
   case recv.params_overflowed {
     True ->
-      Action(
+      Transition(
         state: Idle(<<>>),
         outgoing: encode_overloaded_end(recv.request_id),
         events: [],
@@ -289,23 +295,24 @@ fn finish_params(recv: ReceivingState) -> Action {
   }
 }
 
-fn emit_request_ready(recv: ReceivingState) -> Action {
+fn emit_request_ready(recv: ReceivingState) -> Transition {
   let ready_event =
     RequestReady(
       request_id: recv.request_id,
       params: recv.params,
       keep_conn: recv.keep_conn,
     )
+
   case recv.stdin_done {
     True ->
-      Action(
+      Transition(
         state: Idle(recv.buffer),
         outgoing: bytes_tree.new(),
         events: [ready_event, BodyEnd],
         decision: KeepParsing,
       )
     False ->
-      Action(
+      Transition(
         state: Receiving(ReceivingState(..recv, request_ready_sent: True)),
         outgoing: bytes_tree.new(),
         events: [ready_event],
@@ -318,24 +325,24 @@ fn handle_stdin(
   recv: ReceivingState,
   data: BitArray,
   max_body_size: Int,
-) -> Action {
+) -> Transition {
   case bit_array.byte_size(data) {
     0 -> finish_stdin(recv)
     _ -> handle_stdin_chunk(recv, data, max_body_size)
   }
 }
 
-fn finish_stdin(recv: ReceivingState) -> Action {
+fn finish_stdin(recv: ReceivingState) -> Transition {
   case recv.request_ready_sent {
     True ->
-      Action(
+      Transition(
         state: Idle(recv.buffer),
         outgoing: bytes_tree.new(),
         events: [BodyEnd],
         decision: KeepParsing,
       )
     False ->
-      Action(
+      Transition(
         state: Receiving(ReceivingState(..recv, stdin_done: True)),
         outgoing: bytes_tree.new(),
         events: [],
@@ -348,16 +355,17 @@ fn handle_stdin_chunk(
   recv: ReceivingState,
   data: BitArray,
   max_body_size: Int,
-) -> Action {
+) -> Transition {
   use <- bool.guard(
     when: recv.body_overflowed,
-    return: Action(
+    return: Transition(
       state: Receiving(recv),
       outgoing: bytes_tree.new(),
       events: [],
       decision: KeepParsing,
     ),
   )
+
   let new_total = recv.stdin_received + bit_array.byte_size(data)
   case new_total > max_body_size {
     True -> handle_stdin_overflow(recv)
@@ -369,18 +377,18 @@ fn handle_stdin_in_bounds(
   recv: ReceivingState,
   data: BitArray,
   new_total: Int,
-) -> Action {
+) -> Transition {
   let updated = Receiving(ReceivingState(..recv, stdin_received: new_total))
   case recv.request_ready_sent {
     True ->
-      Action(
+      Transition(
         state: updated,
         outgoing: bytes_tree.new(),
         events: [BodyChunk(data)],
         decision: KeepParsing,
       )
     False ->
-      Action(
+      Transition(
         state: updated,
         outgoing: bytes_tree.new(),
         events: [],
@@ -389,17 +397,17 @@ fn handle_stdin_in_bounds(
   }
 }
 
-fn handle_stdin_overflow(recv: ReceivingState) -> Action {
+fn handle_stdin_overflow(recv: ReceivingState) -> Transition {
   case recv.request_ready_sent {
     True ->
-      Action(
+      Transition(
         state: Receiving(ReceivingState(..recv, body_overflowed: True)),
         outgoing: bytes_tree.new(),
         events: [BodyTooLarge],
         decision: KeepParsing,
       )
     False ->
-      Action(
+      Transition(
         state: Idle(recv.buffer),
         outgoing: encode_overloaded_end(recv.request_id),
         events: [],
@@ -408,14 +416,15 @@ fn handle_stdin_overflow(recv: ReceivingState) -> Action {
   }
 }
 
-fn handle_abort(request_id: Int) -> Action {
+fn handle_abort(request_id: Int) -> Transition {
   let reply =
     protocol.encode_record(protocol.EndRequest(
       request_id:,
       app_status: 0,
       protocol_status: protocol.RequestComplete,
     ))
-  Action(
+
+  Transition(
     state: Idle(<<>>),
     outgoing: reply,
     events: [],
@@ -423,10 +432,10 @@ fn handle_abort(request_id: Int) -> Action {
   )
 }
 
-fn handle_get_values(state: State, names: List(String)) -> Action {
+fn handle_get_values(state: State, names: List(String)) -> Transition {
   let pairs = list.filter_map(names, lookup_capability)
   let reply = protocol.encode_record(protocol.GetValuesResult(pairs:))
-  Action(state:, outgoing: reply, events: [], decision: KeepParsing)
+  Transition(state:, outgoing: reply, events: [], decision: KeepParsing)
 }
 
 /// Informational values reported in response to FCGI_GET_VALUES. Only

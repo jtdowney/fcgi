@@ -10,8 +10,8 @@ connect_tcp(Host, Port) ->
             case gen_tcp:connect(Ip, Port, ?CONNECT_OPTS, 1000) of
                 {ok, _} = Reply ->
                     Reply;
-                {error, R} ->
-                    {error, {posix, R}}
+                {error, Reason} ->
+                    {error, {posix, Reason}}
             end;
         {error, _} ->
             {error, {posix, einval}}
@@ -21,14 +21,14 @@ connect_unix(PathBin) ->
     case gen_tcp:connect({local, PathBin}, 0, ?CONNECT_OPTS, 1000) of
         {ok, _} = Reply ->
             Reply;
-        {error, R} ->
-            {error, {posix, R}}
+        {error, Reason} ->
+            {error, {posix, Reason}}
     end.
 
 socket_port(Socket) ->
     case inet:port(Socket) of
         {ok, Port} ->
             {ok, Port};
-        {error, R} ->
-            {error, {posix, R}}
+        {error, Reason} ->
+            {error, {posix, Reason}}
     end.

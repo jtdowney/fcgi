@@ -36,7 +36,7 @@ pub fn assembles_simple_request_test() {
 
   let outcome =
     responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
-  assert outcome.continuation == responder.WaitForMore
+  assert outcome.next == responder.WaitForMore
   assert outcome.events
     == [
       responder.RequestReady(
@@ -58,7 +58,7 @@ pub fn waits_for_more_when_only_begin_received_test() {
     ))
   let outcome =
     responder.step(responder.Idle(<<>>), bytes: begin, max_body_size: max_body)
-  assert outcome.continuation == responder.WaitForMore
+  assert outcome.next == responder.WaitForMore
   assert outcome.events == []
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
@@ -103,7 +103,7 @@ pub fn body_too_large_after_start_emits_event_test() {
     responder.BodyChunk(_),
     responder.BodyTooLarge,
   ] = outcome.events
-  assert outcome.continuation == responder.WaitForMore
+  assert outcome.next == responder.WaitForMore
 }
 
 pub fn body_too_large_before_start_emits_overloaded_test() {
@@ -133,7 +133,7 @@ pub fn body_too_large_before_start_emits_overloaded_test() {
     )
   assert rest == <<>>
   assert outcome.events == []
-  assert outcome.continuation == responder.CloseConnection
+  assert outcome.next == responder.CloseConnection
 }
 
 pub fn params_overflow_emits_overloaded_test() {
@@ -177,7 +177,7 @@ pub fn params_overflow_emits_overloaded_test() {
       protocol_status: protocol.Overloaded,
     )
   assert rest == <<>>
-  assert outcome.continuation == responder.CloseConnection
+  assert outcome.next == responder.CloseConnection
   assert outcome.events == []
 }
 
@@ -192,7 +192,7 @@ pub fn begin_request_with_id_zero_closes_connection_test() {
   let outcome =
     responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  assert outcome.continuation == responder.CloseConnection
+  assert outcome.next == responder.CloseConnection
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
 
@@ -214,7 +214,7 @@ pub fn unknown_application_record_is_ignored_test() {
     responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
   assert bytes_tree.byte_size(outcome.outgoing) == 0
-  assert outcome.continuation == responder.WaitForMore
+  assert outcome.next == responder.WaitForMore
 }
 
 pub fn multiplexing_rejected_with_cant_mpx_conn_test() {
@@ -244,7 +244,7 @@ pub fn multiplexing_rejected_with_cant_mpx_conn_test() {
       protocol_status: protocol.CantMultiplexConnection,
     )
   assert rest == <<>>
-  assert outcome.continuation == responder.WaitForMore
+  assert outcome.next == responder.WaitForMore
   let assert responder.Receiving(recv) = outcome.state
   assert recv.request_id == 1
 }
@@ -270,7 +270,7 @@ pub fn unknown_record_type_replies_with_unknown_type_test() {
     helpers.parse_outgoing(bytes_tree.to_bit_array(outcome.outgoing))
   assert record == protocol.UnknownType(type_byte: 99)
   assert rest == <<>>
-  assert outcome.continuation == responder.WaitForMore
+  assert outcome.next == responder.WaitForMore
 }
 
 pub fn get_values_returns_capabilities_test() {
@@ -288,7 +288,7 @@ pub fn get_values_returns_capabilities_test() {
   assert list.key_find(pairs, "FCGI_MAX_REQS") == Error(Nil)
   assert list.key_find(pairs, "FCGI_MPXS_CONNS") == Ok("0")
   assert list.length(pairs) == 1
-  assert outcome.continuation == responder.WaitForMore
+  assert outcome.next == responder.WaitForMore
 }
 
 pub fn abort_request_emits_request_complete_test() {
@@ -313,7 +313,7 @@ pub fn abort_request_emits_request_complete_test() {
       protocol_status: protocol.RequestComplete,
     )
   assert rest == <<>>
-  assert outcome.continuation == responder.CloseConnection
+  assert outcome.next == responder.CloseConnection
   assert outcome.state == responder.Idle(<<>>)
   assert outcome.events == []
 }
@@ -337,7 +337,7 @@ pub fn non_responder_role_replies_unknown_role_test() {
       protocol_status: protocol.UnknownRole,
     )
   assert rest == <<>>
-  assert outcome.continuation == responder.CloseConnection
+  assert outcome.next == responder.CloseConnection
   assert outcome.state == responder.Idle(<<>>)
 }
 
@@ -489,7 +489,7 @@ pub fn terminators_arriving_in_separate_feeds_test() {
       bytes: <<begin:bits, real_params:bits>>,
       max_body_size: max_body,
     )
-  assert outcome_one.continuation == responder.WaitForMore
+  assert outcome_one.next == responder.WaitForMore
   assert outcome_one.events == []
 
   let outcome_two =
@@ -498,7 +498,7 @@ pub fn terminators_arriving_in_separate_feeds_test() {
       bytes: params_end,
       max_body_size: max_body,
     )
-  assert outcome_two.continuation == responder.WaitForMore
+  assert outcome_two.next == responder.WaitForMore
   let assert [responder.RequestReady(1, params_buffer, False)] =
     outcome_two.events
   assert params_buffer
@@ -538,7 +538,7 @@ pub fn unsupported_version_closes_connection_test() {
   let outcome =
     responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  assert outcome.continuation == responder.CloseConnection
+  assert outcome.next == responder.CloseConnection
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
 
@@ -556,7 +556,7 @@ pub fn malformed_begin_request_closes_connection_test() {
   let outcome =
     responder.step(responder.Idle(<<>>), bytes:, max_body_size: max_body)
 
-  assert outcome.continuation == responder.CloseConnection
+  assert outcome.next == responder.CloseConnection
   assert bytes_tree.byte_size(outcome.outgoing) == 0
 }
 
@@ -760,7 +760,7 @@ pub fn feed_resumes_across_partial_records_test() {
 
   let outcome_one =
     responder.step(responder.Idle(<<>>), bytes: first, max_body_size: max_body)
-  assert outcome_one.continuation == responder.WaitForMore
+  assert outcome_one.next == responder.WaitForMore
 
   let outcome_two =
     responder.step(outcome_one.state, bytes: second, max_body_size: max_body)

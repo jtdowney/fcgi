@@ -96,6 +96,7 @@ pub fn encode_record_tree_unchecked(
     0:size(8),
   >>
   let padding = <<0:size({ padding_length * 8 })>>
+
   bytes_tree.from_bit_array(header)
   |> bytes_tree.append_tree(body)
   |> bytes_tree.append(padding)
@@ -125,6 +126,7 @@ pub fn encode_name_value_pairs(pairs: List(#(String, String))) -> BytesTree {
     let value_bytes = bit_array.from_string(value)
     let name_length = bit_array.byte_size(name_bytes)
     let value_length = bit_array.byte_size(value_bytes)
+
     acc
     |> bytes_tree.append(encode_length(name_length))
     |> bytes_tree.append(encode_length(value_length))
@@ -157,6 +159,7 @@ pub fn encode_stdout_record_header(
     padding_length:size(8),
     0:size(8),
   >>
+
   #(header, padding_length)
 }
 

@@ -72,8 +72,8 @@ listen_unix(PathBin) ->
             {error, {path_exists, PathBin}};
         {error, enoent} ->
             map_posix(gen_tcp:listen(0, [{ifaddr, {local, PathBin}} | ?LISTEN_OPTS]));
-        {error, R} ->
-            {error, {posix, R}}
+        {error, Reason} ->
+            {error, {posix, Reason}}
     end.
 
 is_stale_socket(PathBin) ->
@@ -95,8 +95,8 @@ socket_port(Socket) ->
     case inet:port(Socket) of
         {ok, Port} ->
             {ok, Port};
-        {error, R} ->
-            {error, {posix, R}}
+        {error, Reason} ->
+            {error, {posix, Reason}}
     end.
 
 send(Socket, Data) ->
@@ -125,8 +125,8 @@ map_posix(ok) ->
     {ok, nil};
 map_posix({ok, _} = Reply) ->
     Reply;
-map_posix({error, R}) ->
-    {error, {posix, R}}.
+map_posix({error, Reason}) ->
+    {error, {posix, Reason}}.
 
 translate_error(Path, enoent) ->
     {file_not_found, Path};

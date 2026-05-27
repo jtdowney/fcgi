@@ -739,7 +739,7 @@ fn await_request(
         keep_conn:,
       )
     _ ->
-      case outcome.continuation {
+      case outcome.next {
         responder.CloseConnection -> Closed
         responder.WaitForMore -> wait_for_bytes(connection, outcome.state)
       }
@@ -1275,7 +1275,7 @@ fn step_body(
 ) -> #(BitArray, BodySnapshot) {
   let outcome = step_and_flush(connection, prior.state, bytes)
   let #(data, ended, overflowed) = collect_body_events(outcome.events)
-  let aborted = case outcome.continuation {
+  let aborted = case outcome.next {
     responder.CloseConnection -> True
     responder.WaitForMore -> False
   }
