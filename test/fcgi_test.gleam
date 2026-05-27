@@ -428,6 +428,15 @@ pub fn end_to_end_get_returns_handler_body_test() {
     ))
 }
 
+pub fn end_to_end_string_builds_text_body_test() {
+  let body =
+    run_handler_with_body(
+      fn() { fcgi.string("hello, joe!") },
+      simple_get_request_bytes(),
+    )
+  assert body == "hello, joe!"
+}
+
 pub fn end_to_end_send_file_streams_fixture_test() {
   let body =
     run_handler_with_body(

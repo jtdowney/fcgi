@@ -274,6 +274,11 @@ pub fn stream(producer: fn(StreamSender) -> Nil) -> ResponseData {
   Stream(producer:)
 }
 
+/// Build a response body from a `String`.
+pub fn string(content: String) -> ResponseData {
+  Bytes(content: bytes_tree.from_string(content))
+}
+
 /// Emit a chunk of body bytes from inside a `Stream` producer.
 ///
 /// Returns `Ok(Nil)` when the chunk is written, or `Error(Nil)` when the

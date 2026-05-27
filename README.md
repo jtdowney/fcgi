@@ -15,7 +15,6 @@ gleam add fcgi
 
 ```gleam
 import fcgi
-import gleam/bytes_tree
 import gleam/erlang/process
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
@@ -35,7 +34,7 @@ fn handle_request(
 ) -> Response(fcgi.ResponseData) {
   response.new(200)
   |> response.set_header("content-type", "text/plain; charset=utf-8")
-  |> response.set_body(fcgi.bytes(bytes_tree.from_string("hello, joe!")))
+  |> response.set_body(fcgi.string("hello, joe!"))
 }
 ```
 
